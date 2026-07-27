@@ -16,7 +16,7 @@ const PINCODE_REGEX = /^\d{6}$/;
 const REQUIRED_CONSENTS = ['nonRefundable', 'terms', 'kyc', 'genuineMerchants', 'policyViolation'];
 const MAX_OTP_ATTEMPTS = 5;
 const OTP_VALIDITY_MS = 5 * 60 * 1000;
-const BOOKING_AMOUNT_PAISE = 110000; // ₹1,100, inclusive of GST — never charge extra on top
+const BOOKING_AMOUNT_PAISE = 118000; // ₹1,180, inclusive of GST — never charge extra on top
 
 // POST /api/v1/distributor/check-pincode
 // Read-only — no lock is taken here. Two people checking the same pincode
