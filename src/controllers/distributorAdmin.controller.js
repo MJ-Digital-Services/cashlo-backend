@@ -217,6 +217,12 @@ export const rejectUtr = asyncHandler(async (req, res) => {
   lead.qrPayment.reviewedBy = req.user._id;
   lead.qrPayment.reviewedAt = new Date();
   lead.leadCallStatus = 'pending_call';
+  lead.status = 'cancelled';
+  await PincodeReservation.findOneAndDelete({
+    pincode: lead.pincode,
+    bookingId: lead._id,
+    status: 'locked',
+  });
   await lead.save();
 
   res.status(200).json({ success: true, data: lead });
