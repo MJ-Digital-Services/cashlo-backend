@@ -5,10 +5,12 @@ export const QR_REVIEW_LOCK_DURATION_MS = 48 * 60 * 60 * 1000; // 48 hours
 
 export const acquirePincodeLock = async ({ pincode, bookingId, durationMs = LOCK_DURATION_MS }) => {
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + durationMs);
+  const expiresAt = durationMs == null ? undefined : new Date(now.getTime() + durationMs);
 
   try {
-    await PincodeReservation.create({ pincode, status: 'locked', bookingId, lockedAt: now, expiresAt });
+    const doc = { pincode, status: 'locked', bookingId, lockedAt: now };
+    if (expiresAt) doc.expiresAt = expiresAt;
+    await PincodeReservation.create(doc);
     return;
   } catch (err) {
     if (err.code !== 11000) throw err;
@@ -16,7 +18,7 @@ export const acquirePincodeLock = async ({ pincode, bookingId, durationMs = LOCK
     const existing = await PincodeReservation.findOne({ pincode });
 
     if (!existing) {
-      return acquirePincodeLock({ pincode, bookingId });
+      return acquirePincodeLock({ pincode, bookingId, durationMs }); // fix: pass durationMs through
     }
 
     if (existing.status === 'confirmed') {
@@ -26,9 +28,12 @@ export const acquirePincodeLock = async ({ pincode, bookingId, durationMs = LOCK
       throw error;
     }
 
-    if (existing.status === 'locked' && existing.expiresAt > now) {
+    const existingIsActive = existing.status === 'locked' && (!existing.expiresAt || existing.expiresAt > now);
+
+    if (existingIsActive) {
       if (String(existing.bookingId) === String(bookingId)) {
-        await PincodeReservation.findOneAndUpdate({ pincode, bookingId }, { $set: { expiresAt } });
+        const update = expiresAt ? { $set: { expiresAt } } : { $unset: { expiresAt: '' } };
+        await PincodeReservation.findOneAndUpdate({ pincode, bookingId }, update);
         return;
       }
 
@@ -38,9 +43,12 @@ export const acquirePincodeLock = async ({ pincode, bookingId, durationMs = LOCK
       throw error;
     }
 
+    const replacement = { pincode, status: 'locked', bookingId, lockedAt: now };
+    if (expiresAt) replacement.expiresAt = expiresAt;
+
     const stolen = await PincodeReservation.findOneAndReplace(
       { pincode, status: 'locked', expiresAt: { $lt: now } },
-      { pincode, status: 'locked', bookingId, lockedAt: now, expiresAt },
+      replacement,
       { returnDocument: 'after' }
     );
 

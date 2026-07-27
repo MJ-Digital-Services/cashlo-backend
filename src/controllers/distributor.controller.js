@@ -47,9 +47,7 @@ export const checkPincode = asyncHandler(async (req, res) => {
     if (reservation.status === 'confirmed') {
       available = false;
       reason = 'already_allotted';
-    } else if (reservation.status === 'locked' && reservation.expiresAt > new Date()) {
-      // Someone else is mid-checkout right now. Not yet sold — softer message
-      // than "already allotted", since it may free up shortly.
+    } else if (reservation.status === 'locked' && (!reservation.expiresAt || reservation.expiresAt > new Date())) {
       available = false;
       reason = 'temporarily_reserved';
     }
@@ -112,7 +110,11 @@ export const getNearbyPincodes = asyncHandler(async (req, res) => {
 
   const unavailableReservations = await PincodeReservation.find({
     pincode: { $in: candidatePincodes },
-    $or: [{ status: 'confirmed' }, { status: 'locked', expiresAt: { $gt: now } }],
+    $or: [
+      { status: 'confirmed' },
+      { status: 'locked', expiresAt: { $gt: now } },
+      { status: 'locked', expiresAt: { $exists: false } },
+    ],
   }).select('pincode');
 
   const unavailableSet = new Set(unavailableReservations.map((r) => r.pincode));
@@ -307,8 +309,8 @@ export const verifyOtp = asyncHandler(async (req, res) => {
   // straight from OTP-verify into the payment step anyway, so this just
   // closes a small race window, and lets manual-mode leads skip createOrder
   // entirely (they redirect to the "we'll call you" page instead).
-  await acquirePincodeLock({ pincode: lead.pincode, bookingId: lead._id });
-  lead.status = 'lock_acquired';
+  // await acquirePincodeLock({ pincode: lead.pincode, bookingId: lead._id });
+  // lead.status = 'lock_acquired';
 
   if (config.distributor.qrPaymentMode) {
     lead.paymentMethod = 'qr_self';
@@ -462,7 +464,7 @@ export const submitUtr = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  if (lead.status !== 'lock_acquired') {
+  if (lead.status !== 'otp_verified') {
     const error = new Error('This booking is not in a state that accepts a UTR submission');
     error.statusCode = 400;
     throw error;
@@ -488,7 +490,7 @@ export const submitUtr = asyncHandler(async (req, res) => {
     await acquirePincodeLock({
       pincode: lead.pincode,
       bookingId: lead._id,
-      durationMs: QR_REVIEW_LOCK_DURATION_MS,
+      durationMs: null,
     });
   } catch (err) {
     // Extremely unlikely at this stage (lead already owns the lock from
@@ -499,6 +501,8 @@ export const submitUtr = asyncHandler(async (req, res) => {
     error.statusCode = 409;
     throw error;
   }
+
+  lead.status = 'lock_acquired';
 
   lead.qrPayment = {
     utr: trimmedUtr,
