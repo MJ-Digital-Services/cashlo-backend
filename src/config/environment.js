@@ -30,5 +30,9 @@ export const config = {
   },
   distributor: {
     manualPaymentMode: process.env.DISTRIBUTOR_MANUAL_PAYMENT_MODE === 'true',
+    // Self-serve QR + UTR flow. If both this and manualPaymentMode are set
+    // true at once, qrPaymentMode wins (checked first in verifyOtp) — don't
+    // run both simultaneously, pick one.
+    qrPaymentMode: process.env.DISTRIBUTOR_QR_PAYMENT_MODE === 'true',
   },
 };

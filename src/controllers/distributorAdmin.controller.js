@@ -113,6 +113,115 @@ export const markLeadPaidManually = asyncHandler(async (req, res) => {
   });
 });
 
+// PATCH /api/v1/admin/distributor/leads/:id/approve-utr
+// Approves a customer-submitted UTR from the self-serve QR flow. Reuses
+// markLeadPaid() by passing the UTR through as a manualPayment record
+// (mode: 'qr') — same reasoning as markLeadPaidManually below: keeps the
+// receipt/email/lock-confirmation logic in exactly one place.
+export const approveUtr = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  if (!mongoose.isValidObjectId(id)) {
+    const error = new Error('Invalid lead id');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const existingLead = await DistributorLead.findById(id);
+  if (!existingLead) {
+    const error = new Error('Lead not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (existingLead.paymentMethod !== 'qr_self') {
+    const error = new Error('This lead did not use the QR self-payment flow');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (existingLead.qrPayment?.reviewStatus !== 'pending') {
+    const error = new Error('There is no pending UTR submission to approve for this lead');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  existingLead.qrPayment.reviewStatus = 'approved';
+  existingLead.qrPayment.reviewedBy = req.user._id;
+  existingLead.qrPayment.reviewedAt = new Date();
+  await existingLead.save();
+
+  const { lead, lockLost } = await markLeadPaid({
+    bookingId: id,
+    manualPayment: {
+      mode: 'qr',
+      reference: existingLead.qrPayment.utr,
+      notes: 'Self-submitted via website QR flow, approved by admin',
+      collectedBy: req.user._id,
+      collectedAt: new Date(),
+    },
+    allowRelockIfFree: true,
+  });
+
+  res.status(200).json({
+    success: true,
+    message: lockLost
+      ? 'UTR approved, but this PIN Code was already taken by another distributor before confirmation. Please arrange a refund.'
+      : 'UTR approved and PIN Code confirmed for this distributor.',
+    data: { lead, lockLost },
+  });
+});
+
+// PATCH /api/v1/admin/distributor/leads/:id/reject-utr
+// Rejects a submitted UTR (couldn't be verified against the bank statement,
+// wrong amount, etc). Routes the lead into the existing pending_call queue
+// so a human follows up — doesn't touch booking status, so the lock (and
+// the customer's ability to resubmit a corrected UTR via submitUtr) stays intact.
+export const rejectUtr = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+
+  if (!mongoose.isValidObjectId(id)) {
+    const error = new Error('Invalid lead id');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!reason || !reason.trim()) {
+    const error = new Error('A rejection reason is required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findById(id);
+  if (!lead) {
+    const error = new Error('Lead not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (lead.paymentMethod !== 'qr_self') {
+    const error = new Error('This lead did not use the QR self-payment flow');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (lead.qrPayment?.reviewStatus !== 'pending') {
+    const error = new Error('There is no pending UTR submission to reject for this lead');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  lead.qrPayment.reviewStatus = 'rejected';
+  lead.qrPayment.rejectionReason = reason.trim();
+  lead.qrPayment.reviewedBy = req.user._id;
+  lead.qrPayment.reviewedAt = new Date();
+  lead.leadCallStatus = 'pending_call';
+  await lead.save();
+
+  res.status(200).json({ success: true, data: lead });
+});
+
 // PATCH /api/v1/admin/distributor/leads/:id/cancel
 // Releases a pending_manual_payment lead that never converted, freeing the
 // pincode for others. Only valid while still pending — once paid/lock_lost,

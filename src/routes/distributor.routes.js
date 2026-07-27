@@ -8,6 +8,7 @@ import {
   verifyPayment,
   razorpayWebhook,
   getNearbyPincodes,
+  submitUtr,
 } from '../controllers/distributor.controller.js';
 
 const router = express.Router();
@@ -28,6 +29,7 @@ router.post('/send-otp', sendOtp);
 router.post('/verify-otp', verifyOtp);
 router.post('/create-order', createOrder);
 router.post('/verify-payment', verifyPayment);
+router.post('/submit-utr', submitUtr);
 router.post('/nearby-pincodes', getNearbyPincodes);
 
 // Razorpay calls this directly — no user-facing rate limit concerns beyond

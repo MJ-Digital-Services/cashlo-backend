@@ -102,7 +102,7 @@ const distributorLeadSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ['razorpay', 'manual'],
+      enum: ['razorpay', 'manual', 'qr_self'],
       default: 'razorpay',
     },
 
@@ -112,6 +112,23 @@ const distributorLeadSchema = new mongoose.Schema(
       notes: { type: String, trim: true, default: '' },
       collectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
       collectedAt: Date,
+    },
+
+    // Self-serve QR + UTR flow: customer scans a static QR, pays externally,
+    // then submits the UTR themselves. Distinct from `manualPayment` above,
+    // which is for admin-collected payments over a phone call. On approval,
+    // this gets folded into `manualPayment` (mode: 'qr') so markLeadPaid()
+    // and the receipt/email logic don't need to know this flow exists.
+    qrPayment: {
+      utr: { type: String, trim: true, default: '' },
+      submittedAt: Date,
+      reviewStatus: {
+        type: String,
+        enum: ['pending', 'approved', 'rejected'],
+      },
+      rejectionReason: { type: String, trim: true, default: '' },
+      reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      reviewedAt: Date,
     },
 
     gst: {
@@ -146,5 +163,12 @@ distributorLeadSchema.index({ pincode: 1 });
 distributorLeadSchema.index({ status: 1 });
 distributorLeadSchema.index({ leadCallStatus: 1 });
 distributorLeadSchema.index({ 'razorpay.orderId': 1 });
+// Sparse: only leads that actually submitted a UTR have this field, so the
+// uniqueness constraint doesn't apply to (and reject) every other document
+// that lacks one.
+distributorLeadSchema.index(
+  { 'qrPayment.utr': 1 },
+  { unique: true, sparse: true }
+);
 
 export default mongoose.model('DistributorLead', distributorLeadSchema);

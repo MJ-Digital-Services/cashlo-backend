@@ -1,10 +1,11 @@
 import PincodeReservation from '../models/PincodeReservation.js';
 
 const LOCK_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+export const QR_REVIEW_LOCK_DURATION_MS = 48 * 60 * 60 * 1000; // 48 hours
 
-export const acquirePincodeLock = async ({ pincode, bookingId }) => {
+export const acquirePincodeLock = async ({ pincode, bookingId, durationMs = LOCK_DURATION_MS }) => {
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + LOCK_DURATION_MS);
+  const expiresAt = new Date(now.getTime() + durationMs);
 
   try {
     await PincodeReservation.create({ pincode, status: 'locked', bookingId, lockedAt: now, expiresAt });

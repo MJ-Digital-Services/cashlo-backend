@@ -6,7 +6,7 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { generateOtp, hashOtp, compareOtp } from '../utils/otp.js';
 import { checkOtpRateLimit, logOtpRequest } from '../utils/otpRateLimiter.js';
 import { sendOtpEmail } from '../services/email.service.js';
-import { acquirePincodeLock } from '../utils/pincodeLock.js';
+import { acquirePincodeLock, QR_REVIEW_LOCK_DURATION_MS } from '../utils/pincodeLock.js';
 import { markLeadPaid } from '../utils/paymentReconciliation.js';
 import { createRazorpayOrder, verifyPaymentSignature, verifyWebhookSignature } from '../services/razorpay.service.js';
 import { config } from '../config/environment.js';
@@ -266,7 +266,10 @@ export const verifyOtp = asyncHandler(async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'OTP already verified',
-      data: { bookingId: lead._id, manualPayment: config.distributor.manualPaymentMode },
+      // Read from the lead itself, not current config — config may have
+      // changed since this lead was originally verified, but the lead's
+      // own stored paymentMethod is what's actually true for it.
+      data: { bookingId: lead._id, manualPayment: lead.paymentMethod === 'manual', paymentMode: lead.paymentMethod },
     });
   }
 
@@ -307,7 +310,12 @@ export const verifyOtp = asyncHandler(async (req, res) => {
   await acquirePincodeLock({ pincode: lead.pincode, bookingId: lead._id });
   lead.status = 'lock_acquired';
 
-  if (config.distributor.manualPaymentMode) {
+  if (config.distributor.qrPaymentMode) {
+    lead.paymentMethod = 'qr_self';
+    const baseAmount = Math.round(BOOKING_AMOUNT_PAISE / 1.18);
+    const gstAmount = BOOKING_AMOUNT_PAISE - baseAmount;
+    lead.gst = { baseAmount, gstAmount, totalAmount: BOOKING_AMOUNT_PAISE };
+  } else if (config.distributor.manualPaymentMode) {
     lead.paymentMethod = 'manual';
     lead.leadCallStatus = 'pending_call';
     const baseAmount = Math.round(BOOKING_AMOUNT_PAISE / 1.18);
@@ -320,7 +328,13 @@ export const verifyOtp = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'OTP verified successfully',
-    data: { bookingId: lead._id, manualPayment: config.distributor.manualPaymentMode },
+    // manualPayment is kept for backward compatibility with the current
+    // frontend; paymentMode is the new, more explicit field going forward.
+    data: {
+      bookingId: lead._id,
+      manualPayment: lead.paymentMethod === 'manual',
+      paymentMode: lead.paymentMethod,
+    },
   });
 });
 
@@ -401,6 +415,119 @@ export const createOrder = asyncHandler(async (req, res) => {
       bookingId: lead._id,
       gst: { baseAmount, gstAmount, totalAmount: BOOKING_AMOUNT_PAISE },
     },
+  });
+});
+
+
+const UTR_REGEX = /^[A-Za-z0-9]{6,22}$/;
+
+// POST /api/v1/distributor/submit-utr
+// Self-serve QR flow: customer scans the static QR, pays externally, then
+// submits the UTR their UPI app showed them. This does NOT mark the lead
+// paid — it only queues it for admin review (see distributorAdmin.controller.js
+// approveUtr/rejectUtr). The pincode lock is extended to a 48-hour window
+// here, since admin review isn't instant like Razorpay's callback.
+export const submitUtr = asyncHandler(async (req, res) => {
+  const { bookingId, utr } = req.body;
+
+  if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
+    const error = new Error('Invalid bookingId');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const trimmedUtr = (utr || '').trim();
+  if (!UTR_REGEX.test(trimmedUtr)) {
+    const error = new Error('Please enter a valid UTR / transaction reference number');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findById(bookingId);
+  if (!lead) {
+    const error = new Error('Booking not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (lead.paymentMethod !== 'qr_self') {
+    const error = new Error('This booking is not set up for QR payment submission');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (lead.status === 'paid') {
+    const error = new Error('This booking has already been paid for');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (lead.status !== 'lock_acquired') {
+    const error = new Error('This booking is not in a state that accepts a UTR submission');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Allow resubmission after a rejection, but not while one is already
+  // pending or has been approved (approval should only ever happen once,
+  // via the admin endpoint, which moves status to 'paid' anyway).
+  if (lead.qrPayment?.reviewStatus === 'pending') {
+    const error = new Error('A UTR is already submitted for this booking and is awaiting review');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (lead.qrPayment?.reviewStatus === 'approved') {
+    const error = new Error('This booking has already been approved');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Refresh the lock to the longer review window before anything else, so
+  // a slow admin queue doesn't risk losing the pincode mid-submission.
+  try {
+    await acquirePincodeLock({
+      pincode: lead.pincode,
+      bookingId: lead._id,
+      durationMs: QR_REVIEW_LOCK_DURATION_MS,
+    });
+  } catch (err) {
+    // Extremely unlikely at this stage (lead already owns the lock from
+    // verifyOtp), but if the lock was somehow lost in the meantime, surface
+    // that clearly rather than letting the UTR get submitted against a
+    // pincode this lead no longer holds.
+    const error = new Error('Your pincode reservation could not be extended. Please contact support.');
+    error.statusCode = 409;
+    throw error;
+  }
+
+  lead.qrPayment = {
+    utr: trimmedUtr,
+    submittedAt: new Date(),
+    reviewStatus: 'pending',
+  };
+
+  try {
+    await lead.save();
+  } catch (err) {
+    // Sparse unique index on qrPayment.utr — this is MongoDB's duplicate
+    // key error, meaning someone already submitted this exact UTR before.
+    if (err.code === 11000) {
+      const error = new Error(
+        'This transaction reference number has already been submitted. If you believe this is a mistake, please contact support.'
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+    throw err;
+  }
+
+  // TODO: notify the admin team that a new UTR is pending review — needs
+  // email.service.js to wire up correctly, not adding a guessed call here.
+
+  res.status(200).json({
+    success: true,
+    message: 'Your payment reference has been submitted and is pending verification.',
+    data: { bookingId: lead._id, status: 'pending_review' },
   });
 });
 
