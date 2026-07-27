@@ -120,7 +120,7 @@ const distributorLeadSchema = new mongoose.Schema(
     // this gets folded into `manualPayment` (mode: 'qr') so markLeadPaid()
     // and the receipt/email logic don't need to know this flow exists.
     qrPayment: {
-      utr: { type: String, trim: true, default: '' },
+      utr: { type: String, trim: true },
       submittedAt: Date,
       reviewStatus: {
         type: String,
