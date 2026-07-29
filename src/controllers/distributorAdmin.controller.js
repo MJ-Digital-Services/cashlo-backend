@@ -9,7 +9,7 @@ const ALLOWED_CALL_STATUSES = ['not_required', 'pending_call', 'called', 'conver
 
 // GET /api/v1/admin/distributor/leads?status=&leadCallStatus=&search=&page=&limit=
 export const listLeads = asyncHandler(async (req, res) => {
-  const { status, leadCallStatus, paymentMethod, search, page = 1, limit = 20 } = req.query;
+  const { status, leadCallStatus, paymentMethod, search, startDate, endDate, page = 1, limit = 20 } = req.query;
 
   const filter = {};
   if (status) filter.status = status;
@@ -24,6 +24,22 @@ export const listLeads = asyncHandler(async (req, res) => {
       { 'qrPayment.utr': new RegExp(search, 'i') },
       { 'manualPayment.reference': new RegExp(search, 'i') },
     ];
+  }
+
+  if (startDate || endDate) {
+    filter.createdAt = {};
+    if (startDate) {
+      const from = new Date(startDate);
+      if (!isNaN(from)) filter.createdAt.$gte = from;
+    }
+    if (endDate) {
+      const to = new Date(endDate);
+      if (!isNaN(to)) {
+        to.setHours(23, 59, 59, 999); // include the whole end day
+        filter.createdAt.$lte = to;
+      }
+    }
+    if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
   }
 
   const skip = (Number(page) - 1) * Number(limit);
