@@ -181,6 +181,24 @@ export const sendOtp = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  // Block a second concurrent attempt while an earlier one is still in
+  // flight — lock_acquired covers both the QR-review-pending window and
+  // the manual-payment-pending window, since both paths set this status
+  // (see verifyOtp / submitUtr). Without this, the same person could hold
+  // two different pincodes locked at once under the same identity.
+  const existingLockedLead = await DistributorLead.findOne({
+    status: 'lock_acquired',
+    $or: [{ email: normalizedEmail }, { mobile }],
+  });
+
+  if (existingLockedLead) {
+    const error = new Error(
+      `You already have a pending PIN Code reservation (${existingLockedLead.pincode}) awaiting approval. Please wait for it to be processed, or use a different email/mobile.`
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
   // Layer 2 rate limit — identifier-based, survives restarts (Section 4a of the HLD)
   await checkOtpRateLimit(normalizedEmail);
 
