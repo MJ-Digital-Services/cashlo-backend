@@ -21,6 +21,8 @@ export const listLeads = asyncHandler(async (req, res) => {
       { email: new RegExp(search, 'i') },
       { mobile: new RegExp(search, 'i') },
       { pincode: new RegExp(search, 'i') },
+      { 'qrPayment.utr': new RegExp(search, 'i') },
+      { 'manualPayment.reference': new RegExp(search, 'i') },
     ];
   }
 
