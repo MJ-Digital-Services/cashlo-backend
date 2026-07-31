@@ -1,15 +1,12 @@
 import nodemailer from 'nodemailer';
 import { config } from '../config/environment.js';
 
-// Plain Gmail SMTP for now — no domain verification needed, but capped at
-// ~500 emails/day and the "from" address is locked to the authenticated
-// Gmail account (can't send as noreply@cashlo.com until a real domain-based
-// provider like ZeptoMail is set up later).
+// SES SMTP — sends as noreply@cashlo.app (domain-verified, DKIM signed).
+// Daily quota: 50,000/day, 14 emails/sec (production access granted).
 const transporter = nodemailer.createTransport({
   host: config.smtp.host,
   port: config.smtp.port,
   secure: config.smtp.port === 465,
-  family: 4, // force IPv4 — Render's network has broken/partial IPv6 routing to Gmail
   auth: {
     user: config.smtp.user,
     pass: config.smtp.pass,
@@ -19,7 +16,7 @@ const transporter = nodemailer.createTransport({
 export const sendOtpEmail = async ({ to, name, otp }) => {
   try {
     await transporter.sendMail({
-      from: `"${config.smtp.fromName}" <${config.smtp.user}>`,
+      from: `"${config.smtp.fromName}" <${config.smtp.fromEmail}>`,
       to,
       subject: 'Your Cashlo Distributor OTP',
       html: `
@@ -42,24 +39,67 @@ export const sendOtpEmail = async ({ to, name, otp }) => {
 export const sendPaymentConfirmationEmail = async ({ to, name, pincode, district, state, amount, paymentId, receiptUrl }) => {
   try {
     await transporter.sendMail({
-      from: `"${config.smtp.fromName}" <${config.smtp.user}>`,
+      from: `"${config.smtp.fromName}" <${config.smtp.fromEmail}>`,
       to,
       subject: "Your Cashlo Distributor PIN Code is Reserved! 🎉",
       html: `
-        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto;">
-          <h2>Congratulations, ${name}!</h2>
-          <p>Your PIN Code <strong>${pincode}</strong> (${district}, ${state}) has been successfully reserved. This territory is now exclusively assigned to you — no other distributor can reserve this PIN Code.</p>
-          <p><strong>Amount Paid:</strong> ₹${(amount / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}<br/>
-          <strong>Payment ID:</strong> ${paymentId}</p>
-          ${receiptUrl ? `<p><a href="${receiptUrl}" style="color: #445df0;">Download your receipt (PDF)</a></p>` : ''}
-          <p>Our team will contact you shortly for onboarding and KYC.</p>
-          <p style="color: #888; font-size: 12px; margin-top: 24px;">This is an automated confirmation from Cashlo. For queries, contact support@cashlo.in.</p>
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; max-width: 520px; margin: 0 auto; background-color: #f5f6fa; padding: 40px 20px;">
+          <div style="background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(68, 93, 240, 0.08);">
+            
+            <!-- Header -->
+            <div style="background: #445df0; padding: 32px 32px 28px; text-align: center;">
+              <div style="color: #ffffff; font-size: 22px; font-weight: 700; letter-spacing: -0.5px;">Cashlo</div>
+            </div>
+
+            <!-- Body -->
+            <div style="padding: 36px 32px;">
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="font-size: 40px; line-height: 1; margin-bottom: 12px;">🎉</div>
+                <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #111827;">Congratulations, ${name}!</h1>
+              </div>
+
+              <p style="font-size: 15px; line-height: 1.6; color: #4b5563; margin: 0 0 24px;">
+                Your PIN Code <strong style="color: #111827;">${pincode}</strong> (${district}, ${state}) has been successfully reserved. This territory is now exclusively assigned to you — no other distributor can reserve this PIN Code.
+              </p>
+
+              <!-- Details card -->
+              <div style="background: #f8f9ff; border: 1px solid #e8eaf9; border-radius: 12px; padding: 20px 24px; margin-bottom: 28px;">
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="padding: 6px 0; font-size: 13px; color: #6b7280;">Amount Paid</td>
+                    <td style="padding: 6px 0; font-size: 14px; color: #111827; font-weight: 600; text-align: right;">₹${(amount / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 6px 0; font-size: 13px; color: #6b7280;">Payment ID</td>
+                    <td style="padding: 6px 0; font-size: 13px; color: #111827; font-weight: 500; text-align: right; font-family: monospace;">${paymentId}</td>
+                  </tr>
+                </table>
+              </div>
+
+              ${receiptUrl ? `
+              <!-- CTA -->
+              <div style="text-align: center; margin-bottom: 28px;">
+                <a href="${receiptUrl}" style="display: inline-block; background: #445df0; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 600; padding: 13px 28px; border-radius: 8px;">Download Receipt (PDF)</a>
+              </div>
+              ` : ''}
+
+              <p style="font-size: 14px; line-height: 1.6; color: #4b5563; margin: 0; text-align: center;">
+                Our team will contact you shortly for onboarding and KYC.
+              </p>
+            </div>
+
+            <!-- Footer -->
+            <div style="padding: 20px 32px; border-top: 1px solid #f0f1f5; text-align: center;">
+              <p style="font-size: 12px; color: #9ca3af; margin: 0;">
+                This is an automated confirmation from Cashlo.<br/>
+                For queries, contact <a href="mailto:support@cashlo.in" style="color: #445df0; text-decoration: none;">support@cashlo.in</a>
+              </p>
+            </div>
+          </div>
         </div>
       `,
     });
   } catch (err) {
-    // Never let an email failure undo an already-successful payment confirmation —
-    // log it, don't throw.
     console.error('❌ Failed to send payment confirmation email:', err.message);
   }
 };

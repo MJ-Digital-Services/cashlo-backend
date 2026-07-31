@@ -19,6 +19,7 @@ export const config = {
     port: Number(process.env.SMTP_PORT) || 587,
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
+    fromEmail: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER,
     fromName: process.env.SMTP_FROM_NAME || 'Cashlo',
   },
   razorpay: {
