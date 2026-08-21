@@ -5,6 +5,11 @@ import { sendPaymentConfirmationEmail } from '../services/email.service.js';
 import { generateReceiptPdfBuffer } from '../services/receipt.service.js';
 import { uploadFile } from '../services/s3.service.js';
 
+// ₹7,080 — current commercial value for full distributor activation.
+// Snapshotted onto the lead at booking-payment time (not read live) so a
+// future fee change never alters what an already-paid distributor owes.
+const TOTAL_DISTRIBUTOR_FEE_PAISE = 708000;
+
 // allowRelockIfFree: only ever passed as true from the manual "mark as paid"
 // admin action (see distributorAdmin.controller.js). Razorpay's own webhook
 // and reconciliation cron never pass this — their timing is tight enough
@@ -27,6 +32,13 @@ export const markLeadPaid = async ({
     setFields.paymentMethod = 'manual';
   }
 
+  // Snapshot the full distributor fee + record this as the booking-stage
+  // payment entry, the moment a lead first becomes paid. Without this,
+  // the "Complete Payment for Existing PIN" flow has no baseline to
+  // calculate the pending balance from (see distributor.controller.js
+  // findExistingBooking / verifyExistingBookingOtp).
+  setFields.totalDistributorFee = TOTAL_DISTRIBUTOR_FEE_PAISE;
+
   const lead = await DistributorLead.findOneAndUpdate(
     { _id: bookingId, status: { $ne: 'paid' } },
     { $set: setFields },
@@ -34,6 +46,23 @@ export const markLeadPaid = async ({
   );
 
   if (!lead) return { lead: null, lockLost: false };
+
+  // Record the booking-stage payment in the ledger — same data source used
+  // by the old migration script, just done live now instead of backfilled.
+  const bookingAmount = lead.razorpay?.amount || lead.gst?.totalAmount || 0;
+  const bookingMethod =
+    lead.paymentMethod === 'qr_self' ? 'qr_self' : lead.paymentMethod === 'manual' ? 'manual' : 'razorpay';
+
+  lead.payments.push({
+    stage: 'booking',
+    method: bookingMethod,
+    amount: bookingAmount,
+    status: 'success',
+    orderId: lead.razorpay?.orderId,
+    paymentId: lead.razorpay?.paymentId,
+    utr: lead.qrPayment?.utr,
+  });
+  await lead.save();
 
   const reservation = await PincodeReservation.findOne({ pincode: lead.pincode });
   let ownsReservation = reservation && String(reservation.bookingId) === String(lead._id);

@@ -88,6 +88,7 @@ const distributorLeadSchema = new mongoose.Schema(
         'expired',
         'cancelled',
         'lock_lost',
+        'activated',
       ],
       default: 'form_submitted',
     },
@@ -135,6 +136,55 @@ const distributorLeadSchema = new mongoose.Schema(
       baseAmount: Number,
       gstAmount: Number,
       totalAmount: Number, // set explicitly by createOrder once a real order exists — never defaulted here
+    },
+    
+    // Snapshot of the full distributor fee at the time the booking payment
+    // succeeded. Stored per-lead so a future fee change never alters what
+    // an already-paid distributor owes for final activation.
+    totalDistributorFee: {
+      type: Number, // paise, inclusive of GST
+    },
+
+        // Ledger of successful/failed payments across both stages (booking +
+    // final). Existing `razorpay` / `qrPayment` / `manualPayment` fields
+    // stay untouched for the booking stage — this array is the source of
+    // truth for computing pendingAmount = totalDistributorFee - sum(success).
+    payments: [
+      {
+        stage: { type: String, enum: ['booking', 'final'], required: true },
+        method: { type: String, enum: ['razorpay', 'qr_self', 'manual'], required: true },
+        amount: { type: Number, required: true }, // paise
+        status: { type: String, enum: ['pending', 'success', 'failed'], required: true },
+        orderId: String,
+        paymentId: String,
+        utr: String,
+        collectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        reviewedAt: Date,
+        rejectionReason: { type: String, trim: true, default: '' },
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
+
+    // Set only when an admin manually triggers activation (final payment
+    // collected offline). Self-service final payment via Razorpay does not
+    // set these — that path is identified by payments[] having a 'final'
+    // entry with method: 'razorpay' instead.
+    activatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    activatedAt: Date,
+
+    // Separate OTP state for the "Complete Payment for Existing PIN" flow —
+    // deliberately not reusing otpHash/otpExpiresAt/otpAttempts above, since
+    // those belong to the original booking flow and a paid/activated lead
+    // must never have that state disturbed.
+    existingBookingOtpHash: {
+      type: String,
+      select: false,
+    },
+    existingBookingOtpExpiresAt: Date,
+    existingBookingOtpAttempts: {
+      type: Number,
+      default: 0,
     },
 
     // For the admin "call this lead" queue — covers both ordinary payment

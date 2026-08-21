@@ -127,6 +127,246 @@ export const getNearbyPincodes = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, data: suggestions });
 });
 
+// POST /api/v1/distributor/find-existing-booking
+// Entry point for the "Complete Payment for Existing PIN" flow. Deliberately
+// returns only masked identity info — full details require OTP verification
+// (see verifyExistingBookingOtp). Only 'paid' and 'activated' leads are
+// findable here; anything earlier in the funnel is treated as "not found"
+// so this endpoint can't be used to probe internal booking state.
+export const findExistingBooking = asyncHandler(async (req, res) => {
+  const { pincode } = req.body;
+
+  if (!pincode || !PINCODE_REGEX.test(pincode)) {
+    const error = new Error('Please enter a valid 6-digit pincode');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findOne({
+    pincode,
+    status: { $in: ['paid', 'activated'] },
+  }).sort({ createdAt: -1 });
+
+  if (!lead) {
+    const error = new Error('No completed booking was found for this PIN Code');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const maskedMobile = lead.mobile.length >= 4
+    ? 'X'.repeat(lead.mobile.length - 4) + lead.mobile.slice(-4)
+    : lead.mobile;
+
+  const [emailUser, emailDomain] = lead.email.split('@');
+  const maskedEmail = emailUser.length > 2
+    ? emailUser[0] + '*'.repeat(emailUser.length - 2) + emailUser.slice(-1) + '@' + emailDomain
+    : lead.email;
+
+  res.status(200).json({
+    success: true,
+    data: {
+      bookingId: lead._id,
+      pincode: lead.pincode,
+      name: lead.name,
+      maskedMobile,
+      maskedEmail,
+      status: lead.status, // 'paid' → payment pending, 'activated' → already done
+    },
+  });
+});
+
+// POST /api/v1/distributor/existing-booking/send-otp
+// Sends OTP to the REGISTERED email on the lead — never to a user-supplied
+// email/mobile — so this can't be used to hijack someone else's booking by
+// just supplying your own contact details.
+export const sendExistingBookingOtp = asyncHandler(async (req, res) => {
+  const { bookingId } = req.body;
+
+  if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
+    const error = new Error('Invalid bookingId');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findById(bookingId);
+  if (!lead || !['paid', 'activated'].includes(lead.status)) {
+    const error = new Error('No completed booking was found for this PIN Code');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  await checkOtpRateLimit(lead.email);
+
+  const otp = generateOtp();
+  const otpHash = await hashOtp(otp);
+
+  lead.existingBookingOtpHash = otpHash;
+  lead.existingBookingOtpExpiresAt = new Date(Date.now() + OTP_VALIDITY_MS);
+  lead.existingBookingOtpAttempts = 0;
+  await lead.save();
+
+  await sendOtpEmail({ to: lead.email, name: lead.name, otp });
+  await logOtpRequest(lead.email);
+
+  res.status(200).json({
+    success: true,
+    message: 'OTP sent to your registered email',
+    data: { bookingId: lead._id },
+  });
+});
+
+// POST /api/v1/distributor/existing-booking/verify-otp
+// On success, returns the FULL unmasked booking + payment summary — this is
+// the gate that unlocks real PII and the payment amount, per the design
+// decision to require OTP before revealing anything beyond masked identity.
+export const verifyExistingBookingOtp = asyncHandler(async (req, res) => {
+  const { bookingId, otp } = req.body;
+
+  if (!bookingId || !otp || !mongoose.isValidObjectId(bookingId)) {
+    const error = new Error('bookingId and otp are required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findById(bookingId).select('+existingBookingOtpHash');
+  if (!lead || !['paid', 'activated'].includes(lead.status)) {
+    const error = new Error('No completed booking was found for this PIN Code');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (!lead.existingBookingOtpExpiresAt || lead.existingBookingOtpExpiresAt < new Date()) {
+    const error = new Error('OTP expired. Please request a new one.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (lead.existingBookingOtpAttempts >= MAX_OTP_ATTEMPTS) {
+    const error = new Error('Too many incorrect attempts. Please request a new OTP.');
+    error.statusCode = 429;
+    throw error;
+  }
+
+  const isValid = await compareOtp(otp, lead.existingBookingOtpHash);
+
+  if (!isValid) {
+    lead.existingBookingOtpAttempts += 1;
+    await lead.save();
+    const remaining = Math.max(0, MAX_OTP_ATTEMPTS - lead.existingBookingOtpAttempts);
+    const error = new Error(`Incorrect OTP. ${remaining} attempt(s) remaining.`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  lead.existingBookingOtpHash = undefined;
+  await lead.save();
+
+  const totalFee = lead.totalDistributorFee || 0;
+  const amountPaid = lead.payments
+    .filter((p) => p.status === 'success')
+    .reduce((sum, p) => sum + p.amount, 0);
+  const pendingAmount = Math.max(0, totalFee - amountPaid);
+
+  res.status(200).json({
+    success: true,
+    message: 'OTP verified successfully',
+    data: {
+      bookingId: lead._id,
+      pincode: lead.pincode,
+      name: lead.name,
+      mobile: lead.mobile,
+      email: lead.email,
+      bookingDate: lead.createdAt,
+      status: lead.status,
+      totalFee,
+      amountPaid,
+      pendingAmount,
+    },
+  });
+});
+
+// POST /api/v1/distributor/existing-booking/submit-final-utr
+// QR/UTR final payment for the "Complete Payment for Existing PIN" flow.
+// Mirrors submitUtr's pattern, but does NOT touch lead.status — per the
+// confirmed rule, only an admin approving this UTR can move status to
+// 'activated'. Submitting here just queues it for review.
+export const submitFinalUtr = asyncHandler(async (req, res) => {
+  const { bookingId, utr } = req.body;
+
+  if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
+    const error = new Error('Invalid bookingId');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const trimmedUtr = (utr || '').trim();
+  if (!UTR_REGEX.test(trimmedUtr)) {
+    const error = new Error('Please enter a valid UTR / transaction reference number');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findById(bookingId);
+  if (!lead || lead.status !== 'paid') {
+    const error = new Error('This booking is not eligible for final payment');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const totalFee = lead.totalDistributorFee || 0;
+  const amountPaid = lead.payments
+    .filter((p) => p.status === 'success')
+    .reduce((sum, p) => sum + p.amount, 0);
+  const pendingAmount = Math.max(0, totalFee - amountPaid);
+
+  if (pendingAmount <= 0) {
+    const error = new Error('No pending amount remains for this booking');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Block resubmission while an earlier final-UTR is still pending review —
+  // same spirit as submitUtr's booking-stage guard.
+  const hasPendingFinalUtr = lead.payments.some(
+    (p) => p.stage === 'final' && p.status === 'pending'
+  );
+  if (hasPendingFinalUtr) {
+    const error = new Error('A payment reference is already submitted for this booking and is awaiting review');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // App-level uniqueness check — payments[].utr can't carry a DB unique
+  // index (it's inside an array), so this is a query-then-insert check.
+  // Small race window is acceptable since this is staff-reviewed, not an
+  // automated activation trigger.
+  const utrAlreadyUsed = await DistributorLead.findOne({
+    $or: [{ 'qrPayment.utr': trimmedUtr }, { 'payments.utr': trimmedUtr }],
+  });
+  if (utrAlreadyUsed) {
+    const error = new Error(
+      'This transaction reference number has already been submitted. If you believe this is a mistake, please contact support.'
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
+  lead.payments.push({
+    stage: 'final',
+    method: 'qr_self',
+    amount: pendingAmount,
+    status: 'pending',
+    utr: trimmedUtr,
+  });
+  await lead.save();
+
+  res.status(200).json({
+    success: true,
+    message: 'Your payment reference has been submitted and is pending verification.',
+    data: { bookingId: lead._id, status: 'pending_review' },
+  });
+});
+
 // POST /api/v1/distributor/send-otp
 // Creates/updates the DistributorLead, sends a fresh OTP. No pincode lock is
 // taken here — that happens later, after OTP verification (Step 4 in the HLD).
@@ -321,14 +561,6 @@ export const verifyOtp = asyncHandler(async (req, res) => {
   lead.status = 'otp_verified';
   lead.otpHash = undefined;
   await lead.save();
-
-  // Lock the pincode immediately on successful verification, in BOTH modes —
-  // previously this only happened inside createOrder. The frontend advances
-  // straight from OTP-verify into the payment step anyway, so this just
-  // closes a small race window, and lets manual-mode leads skip createOrder
-  // entirely (they redirect to the "we'll call you" page instead).
-  // await acquirePincodeLock({ pincode: lead.pincode, bookingId: lead._id });
-  // lead.status = 'lock_acquired';
 
   if (config.distributor.qrPaymentMode) {
     lead.paymentMethod = 'qr_self';

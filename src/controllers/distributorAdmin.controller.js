@@ -190,6 +190,113 @@ export const approveUtr = asyncHandler(async (req, res) => {
   });
 });
 
+// PATCH /api/v1/admin/distributor/leads/:id/approve-final-utr
+// Approves the final (activation) payment UTR for a lead already at
+// status 'paid'. This is the ONLY way — besides self-service payment,
+// once that's added — that a lead can move from 'paid' to 'activated'.
+export const approveFinalUtr = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  if (!mongoose.isValidObjectId(id)) {
+    const error = new Error('Invalid lead id');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findById(id);
+  if (!lead) {
+    const error = new Error('Lead not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (lead.status !== 'paid') {
+    const error = new Error('Only bookings with status "paid" can be activated');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const pendingEntry = lead.payments.find(
+    (p) => p.stage === 'final' && p.status === 'pending'
+  );
+
+  if (!pendingEntry) {
+    const error = new Error('There is no pending final payment submission to approve for this lead');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  pendingEntry.status = 'success';
+  pendingEntry.reviewedBy = req.user._id;
+  pendingEntry.reviewedAt = new Date();
+
+  lead.status = 'activated';
+  lead.activatedBy = req.user._id;
+  lead.activatedAt = new Date();
+
+  await lead.save();
+
+  res.status(200).json({
+    success: true,
+    message: 'Final payment approved. Distributor PIN Code is now activated.',
+    data: lead,
+  });
+});
+
+// PATCH /api/v1/admin/distributor/leads/:id/reject-final-utr
+// Rejects a submitted final-payment UTR. Unlike rejectUtr (booking stage),
+// this does NOT touch lead.status or any pincode lock — status stays 'paid'
+// so the distributor keeps their PIN Code and can simply resubmit a
+// corrected UTR via submitFinalUtr.
+export const rejectFinalUtr = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+
+  if (!mongoose.isValidObjectId(id)) {
+    const error = new Error('Invalid lead id');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!reason || !reason.trim()) {
+    const error = new Error('A rejection reason is required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findById(id);
+  if (!lead) {
+    const error = new Error('Lead not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (lead.status !== 'paid') {
+    const error = new Error('This lead is not in a state that has a pending final payment to reject');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const pendingEntry = lead.payments.find(
+    (p) => p.stage === 'final' && p.status === 'pending'
+  );
+
+  if (!pendingEntry) {
+    const error = new Error('There is no pending final payment submission to reject for this lead');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  pendingEntry.status = 'failed';
+  pendingEntry.rejectionReason = reason.trim();
+  pendingEntry.reviewedBy = req.user._id;
+  pendingEntry.reviewedAt = new Date();
+
+  await lead.save();
+
+  res.status(200).json({ success: true, data: lead });
+});
+
 // PATCH /api/v1/admin/distributor/leads/:id/reject-utr
 // Rejects a submitted UTR (couldn't be verified against the bank statement,
 // wrong amount, etc). Routes the lead into the existing pending_call queue

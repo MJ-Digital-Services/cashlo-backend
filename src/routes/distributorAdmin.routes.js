@@ -8,6 +8,8 @@ import {
   cancelManualLead,
   approveUtr,
   rejectUtr,
+  approveFinalUtr,
+  rejectFinalUtr,
 } from '../controllers/distributorAdmin.controller.js';
 import { protect, restrictTo } from '../middlewares/auth.js';
 
@@ -23,6 +25,10 @@ router.patch('/leads/:id/mark-paid', markLeadPaidManually);
 router.patch('/leads/:id/cancel', cancelManualLead);
 router.patch('/leads/:id/approve-utr', approveUtr);
 router.patch('/leads/:id/reject-utr', rejectUtr);
+router.patch('/leads/:id/approve-final-utr', approveFinalUtr);
+router.patch('/leads/:id/reject-final-utr', rejectFinalUtr);
+
+
 router.get('/webhook-logs', listWebhookLogs);
 
 export default router;

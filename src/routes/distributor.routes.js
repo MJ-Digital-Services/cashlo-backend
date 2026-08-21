@@ -9,6 +9,10 @@ import {
   razorpayWebhook,
   getNearbyPincodes,
   submitUtr,
+  findExistingBooking,
+  sendExistingBookingOtp,
+  verifyExistingBookingOtp,
+  submitFinalUtr,
 } from '../controllers/distributor.controller.js';
 
 const router = express.Router();
@@ -31,6 +35,10 @@ router.post('/create-order', createOrder);
 router.post('/verify-payment', verifyPayment);
 router.post('/submit-utr', submitUtr);
 router.post('/nearby-pincodes', getNearbyPincodes);
+router.post('/find-existing-booking', findExistingBooking);
+router.post('/existing-booking/send-otp', sendExistingBookingOtp);
+router.post('/existing-booking/verify-otp', verifyExistingBookingOtp);
+router.post('/existing-booking/submit-final-utr', submitFinalUtr);
 
 // Razorpay calls this directly — no user-facing rate limit concerns beyond
 // the generic IP limiter above, which is generous enough for Razorpay's
