@@ -9,7 +9,10 @@ async function run() {
 
   const leads = await DistributorLead.find({
     status: 'paid',
-    payments: { $size: 0 },
+    $or: [
+      { payments: { $exists: false } },
+      { payments: { $size: 0 } },
+    ],
   });
 
   console.log(`Found ${leads.length} paid leads to backfill.`);
