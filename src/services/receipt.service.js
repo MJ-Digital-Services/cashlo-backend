@@ -46,15 +46,31 @@ export const generateReceiptPdfBuffer = (data) => {
     doc.fillColor('#888888').fontSize(9).font('Helvetica').text('DESCRIPTION', 50, y);
     doc.text('AMOUNT', 450, y, { align: 'right', width: 95 });
 
-    y += 20;
-    doc.fillColor('#333333').fontSize(10).font('Helvetica').text('PIN Code Reservation Fee', 50, y);
-    doc.text(formatMoney(data.baseAmount), 450, y, { align: 'right', width: 95 });
+    if (data.includeGstBreakdown === false) {
+      y += 20;
+      doc.fillColor('#333333').fontSize(10).font('Helvetica').text(
+        data.lineItemLabel || 'Payment',
+        50,
+        y
+      );
+      doc.text(formatMoney(data.totalAmount), 450, y, { align: 'right', width: 95 });
+      y += 20;
+    } else {
+      y += 20;
+      doc.fillColor('#333333').fontSize(10).font('Helvetica').text(
+        data.lineItemLabel || 'PIN Code Reservation Fee',
+        50,
+        y
+      );
+      doc.text(formatMoney(data.baseAmount), 450, y, { align: 'right', width: 95 });
+
+      y += 20;
+      doc.text('GST (18%)', 50, y);
+      doc.text(formatMoney(data.gstAmount), 450, y, { align: 'right', width: 95 });
+      y += 5;
+    }
 
     y += 20;
-    doc.text('GST (18%)', 50, y);
-    doc.text(formatMoney(data.gstAmount), 450, y, { align: 'right', width: 95 });
-
-    y += 25;
     doc.moveTo(50, y).lineTo(545, y).strokeColor('#111111').lineWidth(1.5).stroke();
 
     y += 12;

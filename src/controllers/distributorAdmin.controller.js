@@ -4,6 +4,9 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import WebhookLog from '../models/WebhookLog.js';
 import PincodeReservation from '../models/PincodeReservation.js';
 import { markLeadPaid } from '../utils/paymentReconciliation.js';
+import { sendDistributorActivationEmail } from '../services/email.service.js';
+import { generateReceiptPdfBuffer } from '../services/receipt.service.js';
+import { uploadFile } from '../services/s3.service.js';
 
 const ALLOWED_CALL_STATUSES = ['not_required', 'pending_call', 'called', 'converted'];
 
@@ -235,6 +238,45 @@ export const approveFinalUtr = asyncHandler(async (req, res) => {
   lead.activatedAt = new Date();
 
   await lead.save();
+
+  let activationReceiptUrl = '';
+  try {
+    const pdfBuffer = await generateReceiptPdfBuffer({
+      bookingId: String(lead._id),
+      name: lead.name,
+      mobile: lead.mobile,
+      email: lead.email,
+      pincode: lead.pincode,
+      district: lead.district,
+      state: lead.state,
+      includeGstBreakdown: false,
+      lineItemLabel: 'Distributor Activation Fee (Final Payment)',
+      totalAmount: pendingEntry.amount,
+      paymentId: pendingEntry.utr || 'Final Payment',
+      orderId: `FINAL-${(pendingEntry.method || 'qr_self').toUpperCase()}`,
+      date: new Date().toISOString(),
+    });
+
+    const uploaded = await uploadFile(
+      pdfBuffer,
+      `activation-receipt-${lead._id}.pdf`,
+      'application/pdf',
+      'receipts'
+    );
+    activationReceiptUrl = uploaded.publicUrl;
+  } catch (err) {
+    console.error('❌ Failed to generate/upload activation receipt PDF:', err.message);
+  }
+
+  await sendDistributorActivationEmail({
+    to: lead.email,
+    name: lead.name,
+    pincode: lead.pincode,
+    district: lead.district,
+    state: lead.state,
+    totalAmount: lead.totalDistributorFee ?? pendingEntry.amount,
+    receiptUrl: activationReceiptUrl,
+  });
 
   res.status(200).json({
     success: true,

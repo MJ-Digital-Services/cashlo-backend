@@ -103,3 +103,70 @@ export const sendPaymentConfirmationEmail = async ({ to, name, pincode, district
     console.error('❌ Failed to send payment confirmation email:', err.message);
   }
 };
+
+export const sendDistributorActivationEmail = async ({ to, name, pincode, district, state, totalAmount, receiptUrl }) => {
+  try {
+    await transporter.sendMail({
+      from: `"${config.smtp.fromName}" <${config.smtp.fromEmail}>`,
+      to,
+      subject: "You're Live! Your Cashlo Distributor PIN Code is Activated ✅",
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; max-width: 520px; margin: 0 auto; background-color: #f5f6fa; padding: 40px 20px;">
+          <div style="background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(16, 185, 129, 0.08);">
+
+            <!-- Header -->
+            <div style="background: #059669; padding: 32px 32px 28px; text-align: center;">
+              <div style="color: #ffffff; font-size: 22px; font-weight: 700; letter-spacing: -0.5px;">Cashlo</div>
+            </div>
+
+            <!-- Body -->
+            <div style="padding: 36px 32px;">
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="font-size: 40px; line-height: 1; margin-bottom: 12px;">✅</div>
+                <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #111827;">You're all set, ${name}!</h1>
+              </div>
+
+              <p style="font-size: 15px; line-height: 1.6; color: #4b5563; margin: 0 0 24px;">
+                Your final payment has been verified and your PIN Code <strong style="color: #111827;">${pincode}</strong> (${district}, ${state}) is now <strong style="color: #059669;">fully activated</strong>. You can now start onboarding merchants in your territory as a Cashlo Distributor.
+              </p>
+
+              <!-- Details card -->
+              <div style="background: #f0fdf6; border: 1px solid #d3f4e3; border-radius: 12px; padding: 20px 24px; margin-bottom: 28px;">
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="padding: 6px 0; font-size: 13px; color: #6b7280;">Total Distributor Fee Paid</td>
+                    <td style="padding: 6px 0; font-size: 14px; color: #111827; font-weight: 600; text-align: right;">₹${(totalAmount / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 6px 0; font-size: 13px; color: #6b7280;">Status</td>
+                    <td style="padding: 6px 0; font-size: 13px; color: #059669; font-weight: 600; text-align: right;">Activated</td>
+                  </tr>
+                </table>
+              </div>
+
+              ${receiptUrl ? `
+              <div style="text-align: center; margin-bottom: 28px;">
+                <a href="${receiptUrl}" style="display: inline-block; background: #059669; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 600; padding: 13px 28px; border-radius: 8px;">Download Receipt (PDF)</a>
+              </div>
+              ` : ''}
+
+              <p style="font-size: 14px; line-height: 1.6; color: #4b5563; margin: 0; text-align: center;">
+                Our onboarding team will reach out shortly with your next steps.
+              </p>
+            </div>
+
+            <!-- Footer -->
+            <div style="padding: 20px 32px; border-top: 1px solid #f0f1f5; text-align: center;">
+              <p style="font-size: 12px; color: #9ca3af; margin: 0;">
+                This is an automated confirmation from Cashlo.<br/>
+                For queries, contact <a href="mailto:support@cashlo.in" style="color: #059669; text-decoration: none;">support@cashlo.in</a>
+              </p>
+            </div>
+          </div>
+        </div>
+      `,
+    });
+  } catch (err) {
+    console.error('❌ Failed to send distributor activation email:', err.message);
+  }
+};
