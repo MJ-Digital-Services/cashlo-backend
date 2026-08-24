@@ -12,12 +12,19 @@ const ALLOWED_CALL_STATUSES = ['not_required', 'pending_call', 'called', 'conver
 
 // GET /api/v1/admin/distributor/leads?status=&leadCallStatus=&search=&page=&limit=
 export const listLeads = asyncHandler(async (req, res) => {
-  const { status, leadCallStatus, paymentMethod, search, startDate, endDate, page = 1, limit = 20 } = req.query;
+  const { status, leadCallStatus, paymentMethod, search, startDate, endDate, page = 1, limit = 20, sortBy = 'updatedAt' } = req.query;
+
+  // Whitelisted to prevent arbitrary field sort injection via query string.
+  const SORT_FIELD = sortBy === 'createdAt' ? 'createdAt' : 'updatedAt';
 
   const filter = {};
   if (status) filter.status = status;
   if (leadCallStatus) filter.leadCallStatus = leadCallStatus;
   if (paymentMethod) filter.paymentMethod = paymentMethod;
+  if (req.query.pendingFinalReview === 'true') {
+    filter.status = 'paid';
+    filter.payments = { $elemMatch: { stage: 'final', status: 'pending' } };
+  }
   if (search) {
     filter.$or = [
       { name: new RegExp(search, 'i') },
@@ -30,25 +37,25 @@ export const listLeads = asyncHandler(async (req, res) => {
   }
 
   if (startDate || endDate) {
-    filter.createdAt = {};
+    filter.updatedAt = {};
     if (startDate) {
       const from = new Date(startDate);
-      if (!isNaN(from)) filter.createdAt.$gte = from;
+      if (!isNaN(from)) filter.updatedAt.$gte = from;
     }
     if (endDate) {
       const to = new Date(endDate);
       if (!isNaN(to)) {
         to.setHours(23, 59, 59, 999); // include the whole end day
-        filter.createdAt.$lte = to;
+        filter.updatedAt.$lte = to;
       }
     }
-    if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
+    if (Object.keys(filter.updatedAt).length === 0) delete filter.updatedAt;
   }
 
   const skip = (Number(page) - 1) * Number(limit);
 
   const [leads, total] = await Promise.all([
-    DistributorLead.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+    DistributorLead.find(filter).sort({ [SORT_FIELD]: -1 }).skip(skip).limit(Number(limit)),
     DistributorLead.countDocuments(filter),
   ]);
 
