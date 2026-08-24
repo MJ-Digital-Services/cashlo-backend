@@ -25,6 +25,10 @@ export const listLeads = asyncHandler(async (req, res) => {
     filter.status = 'paid';
     filter.payments = { $elemMatch: { stage: 'final', status: 'pending' } };
   }
+  if (req.query.pendingBookingReview === 'true') {
+    filter.paymentMethod = 'qr_self';
+    filter['qrPayment.reviewStatus'] = 'pending';
+  }
   if (search) {
     filter.$or = [
       { name: new RegExp(search, 'i') },
