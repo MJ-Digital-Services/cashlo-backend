@@ -12,10 +12,10 @@ const ALLOWED_CALL_STATUSES = ['not_required', 'pending_call', 'called', 'conver
 
 // GET /api/v1/admin/distributor/leads?status=&leadCallStatus=&search=&page=&limit=
 export const listLeads = asyncHandler(async (req, res) => {
-  const { status, leadCallStatus, paymentMethod, search, startDate, endDate, page = 1, limit = 20, sortBy = 'updatedAt' } = req.query;
+  const { status, leadCallStatus, paymentMethod, search, startDate, endDate, page = 1, limit = 20, sortBy = 'createdAt' } = req.query;
 
   // Whitelisted to prevent arbitrary field sort injection via query string.
-  const SORT_FIELD = sortBy === 'createdAt' ? 'createdAt' : 'updatedAt';
+  const SORT_FIELD = sortBy === 'updatedAt' ? 'updatedAt' : 'createdAt';
 
   const filter = {};
   if (status) filter.status = status;
