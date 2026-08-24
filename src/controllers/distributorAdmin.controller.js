@@ -37,19 +37,19 @@ export const listLeads = asyncHandler(async (req, res) => {
   }
 
   if (startDate || endDate) {
-    filter.updatedAt = {};
+    filter.createdAt = {};
     if (startDate) {
       const from = new Date(startDate);
-      if (!isNaN(from)) filter.updatedAt.$gte = from;
+      if (!isNaN(from)) filter.createdAt.$gte = from;
     }
     if (endDate) {
       const to = new Date(endDate);
       if (!isNaN(to)) {
         to.setHours(23, 59, 59, 999); // include the whole end day
-        filter.updatedAt.$lte = to;
+        filter.createdAt.$lte = to;
       }
     }
-    if (Object.keys(filter.updatedAt).length === 0) delete filter.updatedAt;
+    if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
   }
 
   const skip = (Number(page) - 1) * Number(limit);
