@@ -198,6 +198,10 @@ const distributorLeadSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    activationReceiptUrl: {
+      type: String,
+      default: '',
+    },
     lostReason: {
       type: String,
       trim: true,

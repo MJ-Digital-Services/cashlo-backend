@@ -275,6 +275,8 @@ export const approveFinalUtr = asyncHandler(async (req, res) => {
       'receipts'
     );
     activationReceiptUrl = uploaded.publicUrl;
+    lead.activationReceiptUrl = activationReceiptUrl;
+    await lead.save();
   } catch (err) {
     console.error('❌ Failed to generate/upload activation receipt PDF:', err.message);
   }
