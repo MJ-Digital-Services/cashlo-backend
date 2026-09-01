@@ -50,6 +50,24 @@ const distributorLeadSchema = new mongoose.Schema(
       default: 'India',
     },
 
+    // Collected on the final-payment step of the "Complete Payment for
+    // Existing PIN" flow, before the final UTR is accepted.
+    aadhaarAddress: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    shopName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    shopAddress: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+
     consents: {
       nonRefundable: { type: Boolean, default: false },
       terms: { type: Boolean, default: false },

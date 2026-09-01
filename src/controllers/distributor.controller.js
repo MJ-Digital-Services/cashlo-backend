@@ -291,10 +291,20 @@ export const verifyExistingBookingOtp = asyncHandler(async (req, res) => {
 // confirmed rule, only an admin approving this UTR can move status to
 // 'activated'. Submitting here just queues it for review.
 export const submitFinalUtr = asyncHandler(async (req, res) => {
-  const { bookingId, utr } = req.body;
+  const { bookingId, utr, aadhaarAddress, shopName, shopAddress } = req.body;
 
   if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
     const error = new Error('Invalid bookingId');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const trimmedAadhaarAddress = (aadhaarAddress || '').trim();
+  const trimmedShopName = (shopName || '').trim();
+  const trimmedShopAddress = (shopAddress || '').trim();
+
+  if (!trimmedAadhaarAddress || !trimmedShopName || !trimmedShopAddress) {
+    const error = new Error('Aadhaar address, shop name and shop address are required');
     error.statusCode = 400;
     throw error;
   }
@@ -350,6 +360,10 @@ export const submitFinalUtr = asyncHandler(async (req, res) => {
     error.statusCode = 409;
     throw error;
   }
+
+  lead.aadhaarAddress = trimmedAadhaarAddress;
+  lead.shopName = trimmedShopName;
+  lead.shopAddress = trimmedShopAddress;
 
   lead.payments.push({
     stage: 'final',
