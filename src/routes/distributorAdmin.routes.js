@@ -1,6 +1,7 @@
 import express from 'express';
 import {
   listLeads,
+  exportLeads,
   getLead,
   updateLeadCallStatus,
   listWebhookLogs,
@@ -19,6 +20,7 @@ router.use(protect);
 router.use(restrictTo('admin', 'sales'));
 
 router.get('/leads', listLeads);
+router.get('/leads/export', exportLeads);
 router.get('/leads/:id', getLead);
 router.patch('/leads/:id/call-status', updateLeadCallStatus);
 router.patch('/leads/:id/mark-paid', markLeadPaidManually);

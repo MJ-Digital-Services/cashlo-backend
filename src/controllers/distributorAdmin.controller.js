@@ -10,22 +10,18 @@ import { uploadFile } from '../services/s3.service.js';
 
 const ALLOWED_CALL_STATUSES = ['not_required', 'pending_call', 'called', 'converted'];
 
-// GET /api/v1/admin/distributor/leads?status=&leadCallStatus=&search=&page=&limit=
-export const listLeads = asyncHandler(async (req, res) => {
-  const { status, leadCallStatus, paymentMethod, search, startDate, endDate, page = 1, limit = 20, sortBy = 'createdAt' } = req.query;
-
-  // Whitelisted to prevent arbitrary field sort injection via query string.
-  const SORT_FIELD = sortBy === 'updatedAt' ? 'updatedAt' : 'createdAt';
+function buildLeadsFilter(query) {
+  const { status, leadCallStatus, paymentMethod, search, startDate, endDate } = query;
 
   const filter = {};
   if (status) filter.status = status;
   if (leadCallStatus) filter.leadCallStatus = leadCallStatus;
   if (paymentMethod) filter.paymentMethod = paymentMethod;
-  if (req.query.pendingFinalReview === 'true') {
+  if (query.pendingFinalReview === 'true') {
     filter.status = 'paid';
     filter.payments = { $elemMatch: { stage: 'final', status: 'pending' } };
   }
-  if (req.query.pendingBookingReview === 'true') {
+  if (query.pendingBookingReview === 'true') {
     filter.paymentMethod = 'qr_self';
     filter['qrPayment.reviewStatus'] = 'pending';
   }
@@ -49,17 +45,42 @@ export const listLeads = asyncHandler(async (req, res) => {
     if (endDate) {
       const to = new Date(endDate);
       if (!isNaN(to)) {
-        to.setHours(23, 59, 59, 999); // include the whole end day
+        to.setHours(23, 59, 59, 999);
         filter.createdAt.$lte = to;
       }
     }
     if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
   }
 
+  return filter;
+}
+
+// GET /api/v1/admin/distributor/leads?status=&leadCallStatus=&search=&page=&limit=
+export const listLeads = asyncHandler(async (req, res) => {
+  const {
+    status,
+    leadCallStatus,
+    paymentMethod,
+    search,
+    startDate,
+    endDate,
+    page = 1,
+    limit = 20,
+    sortBy = 'createdAt',
+    sortOrder = 'desc',
+  } = req.query;
+
+  // Whitelisted to prevent arbitrary field sort injection via query string.
+  const SORTABLE_FIELDS = ['createdAt', 'updatedAt', 'name', 'status', 'pincode'];
+  const SORT_FIELD = SORTABLE_FIELDS.includes(sortBy) ? sortBy : 'createdAt';
+  const SORT_DIR = sortOrder === 'asc' ? 1 : -1;
+
+  const filter = buildLeadsFilter(req.query);
+
   const skip = (Number(page) - 1) * Number(limit);
 
   const [leads, total] = await Promise.all([
-    DistributorLead.find(filter).sort({ [SORT_FIELD]: -1 }).skip(skip).limit(Number(limit)),
+    DistributorLead.find(filter).sort({ [SORT_FIELD]: SORT_DIR }).skip(skip).limit(Number(limit)),
     DistributorLead.countDocuments(filter),
   ]);
 
@@ -68,6 +89,53 @@ export const listLeads = asyncHandler(async (req, res) => {
     data: leads,
     pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / Number(limit)) },
   });
+});
+
+// GET /api/v1/admin/distributor/leads/export?status=&leadCallStatus=&search=&startDate=&endDate=...
+// Same filters as listLeads, no pagination — streams every matching lead as CSV.
+const CSV_COLUMNS = [
+  { header: 'Name', get: (l) => l.name },
+  { header: 'Mobile', get: (l) => l.mobile },
+  { header: 'Email', get: (l) => l.email },
+  { header: 'Pincode', get: (l) => l.pincode },
+  { header: 'District', get: (l) => l.district },
+  { header: 'State', get: (l) => l.state },
+  { header: 'Status', get: (l) => l.status },
+  { header: 'Call Status', get: (l) => l.leadCallStatus },
+  { header: 'Payment Method', get: (l) => l.paymentMethod || '' },
+  { header: 'Total Distributor Fee', get: (l) => (l.totalDistributorFee != null ? l.totalDistributorFee / 100 : '') },
+  { header: 'Shop Name', get: (l) => l.shopName || '' },
+  { header: 'Shop Address', get: (l) => l.shopAddress || '' },
+  { header: 'Aadhaar Address', get: (l) => l.aadhaarAddress || '' },
+  { header: 'Created At', get: (l) => l.createdAt?.toISOString?.() || '' },
+  { header: 'Updated At', get: (l) => l.updatedAt?.toISOString?.() || '' },
+];
+
+function csvEscape(value) {
+  const str = value == null ? '' : String(value);
+  if (/[",\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+export const exportLeads = asyncHandler(async (req, res) => {
+  const { sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
+  const SORTABLE_FIELDS = ['createdAt', 'updatedAt', 'name', 'status', 'pincode'];
+  const SORT_FIELD = SORTABLE_FIELDS.includes(sortBy) ? sortBy : 'createdAt';
+  const SORT_DIR = sortOrder === 'asc' ? 1 : -1;
+
+  const filter = buildLeadsFilter(req.query);
+
+  const leads = await DistributorLead.find(filter).sort({ [SORT_FIELD]: SORT_DIR });
+
+  const headerRow = CSV_COLUMNS.map((c) => csvEscape(c.header)).join(',');
+  const rows = leads.map((lead) => CSV_COLUMNS.map((c) => csvEscape(c.get(lead))).join(','));
+  const csv = [headerRow, ...rows].join('\n');
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="distributor-leads-${Date.now()}.csv"`);
+  res.status(200).send(csv);
 });
 
 // GET /api/v1/admin/distributor/leads/:id
