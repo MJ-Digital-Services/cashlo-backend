@@ -10,6 +10,27 @@ import { uploadFile } from '../services/s3.service.js';
 
 const ALLOWED_CALL_STATUSES = ['not_required', 'pending_call', 'called', 'converted'];
 
+// startDate/endDate come from the admin UI as plain "YYYY-MM-DD" strings
+// meant to represent an IST calendar day (all leads are IST-timezone
+// users). `new Date("YYYY-MM-DD")` parses as UTC midnight, which is WRONG
+// for IST — IST is UTC+5:30, so IST midnight is actually 18:30 UTC the
+// previous day. Without this correction, anything created between
+// 00:00–05:29 IST gets bucketed into the previous UTC day and silently
+// excluded from "today" filters.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+function istDayStartUtc(dateStr) {
+  const utcMidnight = new Date(`${dateStr}T00:00:00.000Z`);
+  if (isNaN(utcMidnight)) return null;
+  return new Date(utcMidnight.getTime() - IST_OFFSET_MS);
+}
+
+function istDayEndUtc(dateStr) {
+  const start = istDayStartUtc(dateStr);
+  if (!start) return null;
+  return new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
+}
+
 function buildLeadsFilter(query) {
   const { status, leadCallStatus, paymentMethod, search, startDate, endDate } = query;
 
@@ -39,15 +60,12 @@ function buildLeadsFilter(query) {
   if (startDate || endDate) {
     filter.createdAt = {};
     if (startDate) {
-      const from = new Date(startDate);
-      if (!isNaN(from)) filter.createdAt.$gte = from;
+      const from = istDayStartUtc(startDate);
+      if (from) filter.createdAt.$gte = from;
     }
     if (endDate) {
-      const to = new Date(endDate);
-      if (!isNaN(to)) {
-        to.setHours(23, 59, 59, 999);
-        filter.createdAt.$lte = to;
-      }
+      const to = istDayEndUtc(endDate);
+      if (to) filter.createdAt.$lte = to;
     }
     if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
   }
