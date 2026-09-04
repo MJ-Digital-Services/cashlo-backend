@@ -50,6 +50,10 @@ function buildLeadsFilter(query) {
     filter.status = 'activated';
     filter.idCreated = { $ne: true };
   }
+  if (query.idCreated === 'true') {
+    filter.status = 'activated';
+    filter.idCreated = true;
+  }
   if (search) {
     filter.$or = [
       { name: new RegExp(search, 'i') },
@@ -76,7 +80,7 @@ function buildLeadsFilter(query) {
 
   // Pending ID creation scans the entire backlog, not just a date window —
   // strip any date filter regardless of what the client sent.
-  if (query.pendingIdCreation === 'true') {
+  if (query.pendingIdCreation === 'true' || query.idCreated === 'true') {
     delete filter.createdAt;
   }
 
