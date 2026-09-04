@@ -604,7 +604,7 @@ export const listWebhookLogs = asyncHandler(async (req, res) => {
 // created manually in another application only after that point.
 export const updateIdCreated = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { idCreated } = req.body;
+  const { idCreated, remark } = req.body;
 
   if (!mongoose.isValidObjectId(id)) {
     const error = new Error('Invalid lead id');
@@ -635,6 +635,19 @@ export const updateIdCreated = asyncHandler(async (req, res) => {
     const error = new Error('idCreated cannot be reverted once set — this action is one-time only');
     error.statusCode = 400;
     throw error;
+  }
+
+  // Remark is only required when actually marking as created (true) — not
+  // meaningful/required for any other call shape, though in practice this
+  // endpoint is only ever called with true given the one-way lock above.
+  if (idCreated) {
+    const trimmedRemark = (remark || '').trim();
+    if (!trimmedRemark) {
+      const error = new Error('A remark is required when marking this lead as ID created');
+      error.statusCode = 400;
+      throw error;
+    }
+    lead.idCreatedRemark = trimmedRemark;
   }
 
   lead.idCreated = idCreated;

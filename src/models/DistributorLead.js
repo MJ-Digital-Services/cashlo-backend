@@ -201,6 +201,11 @@ const distributorLeadSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    idCreatedRemark: {
+      type: String,
+      trim: true,
+      default: '',
+    },
 
     // Separate OTP state for the "Complete Payment for Existing PIN" flow —
     // deliberately not reusing otpHash/otpExpiresAt/otpAttempts above, since
