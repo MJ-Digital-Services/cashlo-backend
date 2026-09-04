@@ -52,6 +52,12 @@ const distributorLeadSchema = new mongoose.Schema(
 
     // Collected on the final-payment step of the "Complete Payment for
     // Existing PIN" flow, before the final UTR is accepted.
+    panCard: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: '',
+    },
     aadhaarAddress: {
       type: String,
       trim: true,

@@ -13,6 +13,7 @@ import { config } from '../config/environment.js';
 import WebhookLog from '../models/WebhookLog.js';
 
 const PINCODE_REGEX = /^\d{6}$/;
+const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
 const REQUIRED_CONSENTS = ['nonRefundable', 'terms', 'kyc', 'genuineMerchants', 'policyViolation'];
 const MAX_OTP_ATTEMPTS = 5;
 const OTP_VALIDITY_MS = 5 * 60 * 1000;
@@ -291,7 +292,7 @@ export const verifyExistingBookingOtp = asyncHandler(async (req, res) => {
 // confirmed rule, only an admin approving this UTR can move status to
 // 'activated'. Submitting here just queues it for review.
 export const submitFinalUtr = asyncHandler(async (req, res) => {
-  const { bookingId, utr, aadhaarAddress, shopName, shopAddress } = req.body;
+  const { bookingId, utr, panCard, aadhaarAddress, shopName, shopAddress } = req.body;
 
   if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
     const error = new Error('Invalid bookingId');
@@ -299,12 +300,19 @@ export const submitFinalUtr = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  const trimmedPanCard = (panCard || '').trim().toUpperCase();
   const trimmedAadhaarAddress = (aadhaarAddress || '').trim();
   const trimmedShopName = (shopName || '').trim();
   const trimmedShopAddress = (shopAddress || '').trim();
 
-  if (!trimmedAadhaarAddress || !trimmedShopName || !trimmedShopAddress) {
-    const error = new Error('Aadhaar address, shop name and shop address are required');
+  if (!trimmedPanCard || !trimmedAadhaarAddress || !trimmedShopName || !trimmedShopAddress) {
+    const error = new Error('PAN card, Aadhaar address, shop name and shop address are required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!PAN_REGEX.test(trimmedPanCard)) {
+    const error = new Error('Please enter a valid PAN card number (e.g. ABCDE1234F)');
     error.statusCode = 400;
     throw error;
   }
@@ -361,6 +369,7 @@ export const submitFinalUtr = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  lead.panCard = trimmedPanCard;
   lead.aadhaarAddress = trimmedAadhaarAddress;
   lead.shopName = trimmedShopName;
   lead.shopAddress = trimmedShopAddress;
