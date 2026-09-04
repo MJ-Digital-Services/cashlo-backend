@@ -74,6 +74,12 @@ function buildLeadsFilter(query) {
     if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
   }
 
+  // Pending ID creation scans the entire backlog, not just a date window —
+  // strip any date filter regardless of what the client sent.
+  if (query.pendingIdCreation === 'true') {
+    delete filter.createdAt;
+  }
+
   return filter;
 }
 
