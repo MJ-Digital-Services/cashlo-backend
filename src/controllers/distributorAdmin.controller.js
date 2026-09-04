@@ -46,6 +46,10 @@ function buildLeadsFilter(query) {
     filter.paymentMethod = 'qr_self';
     filter['qrPayment.reviewStatus'] = 'pending';
   }
+  if (query.pendingIdCreation === 'true') {
+    filter.status = 'activated';
+    filter.idCreated = { $ne: true };
+  }
   if (search) {
     filter.$or = [
       { name: new RegExp(search, 'i') },
@@ -585,4 +589,50 @@ export const listWebhookLogs = asyncHandler(async (req, res) => {
     data: logs,
     pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / Number(limit)) },
   });
+});
+
+// PATCH /api/v1/admin/distributor/leads/:id/id-created
+// Deliberately narrow, same reasoning as updateLeadCallStatus above — only
+// idCreated can be changed here. Only allowed once the lead is 'activated'
+// (i.e. final payment has been approved), since the distributor ID is
+// created manually in another application only after that point.
+export const updateIdCreated = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { idCreated } = req.body;
+
+  if (!mongoose.isValidObjectId(id)) {
+    const error = new Error('Invalid lead id');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (typeof idCreated !== 'boolean') {
+    const error = new Error('idCreated must be a boolean');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findById(id);
+  if (!lead) {
+    const error = new Error('Lead not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (lead.status !== 'activated') {
+    const error = new Error('idCreated can only be set once this lead is activated');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (lead.idCreated && !idCreated) {
+    const error = new Error('idCreated cannot be reverted once set — this action is one-time only');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  lead.idCreated = idCreated;
+  await lead.save();
+
+  res.status(200).json({ success: true, data: lead });
 });

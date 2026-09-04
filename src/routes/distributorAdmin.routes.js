@@ -4,6 +4,7 @@ import {
   exportLeads,
   getLead,
   updateLeadCallStatus,
+  updateIdCreated,
   listWebhookLogs,
   markLeadPaidManually,
   cancelManualLead,
@@ -23,6 +24,7 @@ router.get('/leads', listLeads);
 router.get('/leads/export', exportLeads);
 router.get('/leads/:id', getLead);
 router.patch('/leads/:id/call-status', updateLeadCallStatus);
+router.patch('/leads/:id/id-created', updateIdCreated);
 router.patch('/leads/:id/mark-paid', markLeadPaidManually);
 router.patch('/leads/:id/cancel', cancelManualLead);
 router.patch('/leads/:id/approve-utr', approveUtr);

@@ -190,6 +190,11 @@ const distributorLeadSchema = new mongoose.Schema(
     // entry with method: 'razorpay' instead.
     activatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     activatedAt: Date,
+    
+    idCreated: {
+      type: Boolean,
+      default: false,
+    },
 
     // Separate OTP state for the "Complete Payment for Existing PIN" flow —
     // deliberately not reusing otpHash/otpExpiresAt/otpAttempts above, since
