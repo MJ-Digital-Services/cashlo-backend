@@ -11,6 +11,7 @@ import { markLeadPaid } from '../utils/paymentReconciliation.js';
 import { createRazorpayOrder, verifyPaymentSignature, verifyWebhookSignature } from '../services/razorpay.service.js';
 import { config } from '../config/environment.js';
 import WebhookLog from '../models/WebhookLog.js';
+import { checkEmailValidity } from '../utils/emailVerification.js';
 
 const PINCODE_REGEX = /^\d{6}$/;
 const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
@@ -424,6 +425,13 @@ export const sendOtp = asyncHandler(async (req, res) => {
   }
 
   const normalizedEmail = email.trim().toLowerCase();
+
+  const emailCheck = await checkEmailValidity(normalizedEmail);
+  if (!emailCheck.valid) {
+    const error = new Error('Please enter a valid, deliverable email address');
+    error.statusCode = 400;
+    throw error;
+  }
 
   // One distributor = one PIN code, for life. Checked on EITHER email or
   // mobile matching an existing PAID lead — blocks the obvious workaround of

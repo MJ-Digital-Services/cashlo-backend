@@ -22,6 +22,9 @@ export const config = {
     fromEmail: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER,
     fromName: process.env.SMTP_FROM_NAME || 'Cashlo',
   },
+  quickEmailVerification: {
+    apiKey: process.env.QUICK_EMAIL_VERIFICATION_API_KEY,
+  },
   razorpay: {
     keyId: process.env.RAZORPAY_KEY_ID,
     keySecret: process.env.RAZORPAY_KEY_SECRET,
