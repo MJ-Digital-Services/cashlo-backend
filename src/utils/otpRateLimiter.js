@@ -1,6 +1,6 @@
 import OtpRequestLog from '../models/OtpRequestLog.js';
 
-const MAX_PER_HOUR = 5;
+const MAX_PER_HOUR = 30;
 const COOLDOWN_SECONDS = 45;
 
 // Throws a 429 if this identifier (email, in our case) has hit the hourly cap
