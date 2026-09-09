@@ -113,6 +113,7 @@ const distributorLeadSchema = new mongoose.Schema(
         'cancelled',
         'lock_lost',
         'activated',
+        'refunded',
       ],
       default: 'form_submitted',
     },
@@ -207,6 +208,20 @@ const distributorLeadSchema = new mongoose.Schema(
       default: '',
     },
 
+    // Admin-marked refund. Only settable while idCreated is false — once an
+    // ID is created downstream, refund is blocked entirely (see
+    // markRefunded in distributorAdmin.controller.js). amount is NEVER
+    // admin-entered — it's computed server-side from payments[] at the
+    // moment of refund, so it always matches exactly what was collected.
+    refund: {
+      utr: { type: String, trim: true },
+      remark: { type: String, trim: true, default: '' },
+      amount: Number, // paise — sum of payments[] with status: 'success' at refund time
+      previousStatus: { type: String, trim: true }, // 'paid' | 'activated' | 'lock_lost' — audit trail
+      refundedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      refundedAt: Date,
+    },
+
     // Separate OTP state for the "Complete Payment for Existing PIN" flow —
     // deliberately not reusing otpHash/otpExpiresAt/otpAttempts above, since
     // those belong to the original booking flow and a paid/activated lead
@@ -256,6 +271,13 @@ distributorLeadSchema.index({ 'razorpay.orderId': 1 });
 // that lacks one.
 distributorLeadSchema.index(
   { 'qrPayment.utr': 1 },
+  { unique: true, sparse: true }
+);
+
+// Same reasoning — only refunded leads have refund.utr, and the same UTR
+// should never be usable for two different refunds.
+distributorLeadSchema.index(
+  { 'refund.utr': 1 },
   { unique: true, sparse: true }
 );
 

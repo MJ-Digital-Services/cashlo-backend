@@ -12,6 +12,7 @@ import {
   rejectUtr,
   approveFinalUtr,
   rejectFinalUtr,
+  markRefunded,
 } from '../controllers/distributorAdmin.controller.js';
 import { protect, restrictTo } from '../middlewares/auth.js';
 
@@ -31,6 +32,7 @@ router.patch('/leads/:id/approve-utr', approveUtr);
 router.patch('/leads/:id/reject-utr', rejectUtr);
 router.patch('/leads/:id/approve-final-utr', approveFinalUtr);
 router.patch('/leads/:id/reject-final-utr', rejectFinalUtr);
+router.patch('/leads/:id/mark-refunded', markRefunded);
 
 
 router.get('/webhook-logs', listWebhookLogs);

@@ -9,6 +9,8 @@ import { generateReceiptPdfBuffer } from '../services/receipt.service.js';
 import { uploadFile } from '../services/s3.service.js';
 
 const ALLOWED_CALL_STATUSES = ['not_required', 'pending_call', 'called', 'converted'];
+const REFUND_UTR_REGEX = /^[A-Za-z0-9]{6,22}$/;
+const REFUND_ELIGIBLE_STATUSES = ['paid', 'activated', 'lock_lost'];
 
 // startDate/endDate come from the admin UI as plain "YYYY-MM-DD" strings
 // meant to represent an IST calendar day (all leads are IST-timezone
@@ -54,6 +56,9 @@ function buildLeadsFilter(query) {
     filter.status = 'activated';
     filter.idCreated = true;
   }
+  if (query.refunded === 'true') {
+    filter.status = 'refunded';
+  }
   if (search) {
     filter.$or = [
       { name: new RegExp(search, 'i') },
@@ -78,9 +83,9 @@ function buildLeadsFilter(query) {
     if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
   }
 
-  // Pending ID creation scans the entire backlog, not just a date window —
-  // strip any date filter regardless of what the client sent.
-  if (query.pendingIdCreation === 'true' || query.idCreated === 'true') {
+  // Pending ID creation and refund views scan the entire backlog, not just
+  // a date window — strip any date filter regardless of what the client sent.
+  if (query.pendingIdCreation === 'true' || query.idCreated === 'true' || query.refunded === 'true') {
     delete filter.createdAt;
   }
 
@@ -139,6 +144,11 @@ const CSV_COLUMNS = [
   { header: 'Shop Name', get: (l) => l.shopName || '' },
   { header: 'Shop Address', get: (l) => l.shopAddress || '' },
   { header: 'Aadhaar Address', get: (l) => l.aadhaarAddress || '' },
+  { header: 'Refund Status', get: (l) => (l.status === 'refunded' ? 'Refunded' : '') },
+  { header: 'Refund Amount', get: (l) => (l.refund?.amount != null ? l.refund.amount / 100 : '') },
+  { header: 'Refund UTR', get: (l) => l.refund?.utr || '' },
+  { header: 'Refund Remark', get: (l) => l.refund?.remark || '' },
+  { header: 'Refunded At', get: (l) => l.refund?.refundedAt?.toISOString?.() || '' },
   { header: 'Created At', get: (l) => l.createdAt?.toISOString?.() || '' },
   { header: 'Updated At', get: (l) => l.updatedAt?.toISOString?.() || '' },
 ];
@@ -448,6 +458,134 @@ export const rejectFinalUtr = asyncHandler(async (req, res) => {
   pendingEntry.reviewedAt = new Date();
 
   await lead.save();
+
+  res.status(200).json({ success: true, data: lead });
+});
+
+// PATCH /api/v1/admin/distributor/leads/:id/mark-refunded
+// Admin-only manual refund marker — no payment gateway integration, this
+// just records that money was returned outside the system (bank transfer,
+// UPI, etc). Only allowed while idCreated is false: once a distributor ID
+// exists downstream, refund is permanently blocked here — same one-way
+// reasoning as idCreated itself. Releases the pincode reservation
+// (locked or confirmed) so it becomes bookable by someone else again.
+export const markRefunded = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { utr, remark } = req.body;
+
+  if (!mongoose.isValidObjectId(id)) {
+    const error = new Error('Invalid lead id');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const trimmedUtr = (utr || '').trim();
+  const trimmedRemark = (remark || '').trim();
+
+  if (!trimmedUtr || !REFUND_UTR_REGEX.test(trimmedUtr)) {
+    const error = new Error('A valid UTR / transaction reference number is required for refund');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!trimmedRemark) {
+    const error = new Error('A remark is required to mark this lead as refunded');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findById(id);
+  if (!lead) {
+    const error = new Error('Lead not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (lead.idCreated) {
+    const error = new Error('This lead already has a distributor ID created — refund is no longer possible');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (lead.status === 'refunded') {
+    const error = new Error('This lead has already been refunded');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!REFUND_ELIGIBLE_STATUSES.includes(lead.status)) {
+    const error = new Error(
+      `Only leads with status ${REFUND_ELIGIBLE_STATUSES.join(', ')} are eligible for refund`
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // App-level uniqueness check across every place a UTR can live — same
+  // reasoning as submitUtr/submitFinalUtr, since refund.utr can't carry a
+  // meaningful unique constraint check any other way before the save-time
+  // sparse index catches a true race.
+  const utrAlreadyUsed = await DistributorLead.findOne({
+    $or: [
+      { 'qrPayment.utr': trimmedUtr },
+      { 'payments.utr': trimmedUtr },
+      { 'refund.utr': trimmedUtr },
+    ],
+  });
+  if (utrAlreadyUsed) {
+    const error = new Error(
+      'This transaction reference number has already been used elsewhere. If you believe this is a mistake, please contact support.'
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
+  // Refund amount is always derived from the ledger, never admin-entered —
+  // guarantees it matches exactly what was actually collected.
+  const refundAmount = lead.payments
+    .filter((p) => p.status === 'success')
+    .reduce((sum, p) => sum + p.amount, 0);
+
+  if (refundAmount <= 0) {
+    const error = new Error('No successful payment was found on this lead to refund');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const previousStatus = lead.status;
+
+  lead.refund = {
+    utr: trimmedUtr,
+    remark: trimmedRemark,
+    amount: refundAmount,
+    previousStatus,
+    refundedBy: req.user._id,
+    refundedAt: new Date(),
+  };
+  lead.status = 'refunded';
+  lead.leadCallStatus = 'not_required';
+
+  try {
+    await lead.save();
+  } catch (err) {
+    if (err.code === 11000) {
+      const error = new Error(
+        'This transaction reference number has already been used elsewhere. If you believe this is a mistake, please contact support.'
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+    throw err;
+  }
+
+  // Release the pincode — whether it was still 'locked' (e.g. a lock_lost
+  // lead refunded before ever confirming) or 'confirmed' (paid/activated).
+  // No status filter here deliberately, unlike rejectUtr's narrower delete,
+  // since a refund can legitimately happen from either lock state.
+  await PincodeReservation.findOneAndDelete({
+    pincode: lead.pincode,
+    bookingId: lead._id,
+  });
 
   res.status(200).json({ success: true, data: lead });
 });
