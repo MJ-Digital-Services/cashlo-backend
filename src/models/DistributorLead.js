@@ -28,6 +28,14 @@ const distributorLeadSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+    // Captured separately on the final-payment step (submitFinalUtr) — kept
+    // distinct from referralCode above (captured at initial form submission)
+    // since they can legitimately differ and neither should overwrite the other.
+    finalReferralCode: {
+      type: String,
+      trim: true,
+      default: '',
+    },
 
     pincode: {
       type: String,

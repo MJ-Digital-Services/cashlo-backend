@@ -4,7 +4,7 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import WebhookLog from '../models/WebhookLog.js';
 import PincodeReservation from '../models/PincodeReservation.js';
 import { markLeadPaid } from '../utils/paymentReconciliation.js';
-import { sendDistributorActivationEmail } from '../services/email.service.js';
+import { sendDistributorActivationEmail, sendDistributorRefundEmail } from '../services/email.service.js';
 import { generateReceiptPdfBuffer } from '../services/receipt.service.js';
 import { uploadFile } from '../services/s3.service.js';
 
@@ -144,6 +144,7 @@ const CSV_COLUMNS = [
   { header: 'Shop Name', get: (l) => l.shopName || '' },
   { header: 'Shop Address', get: (l) => l.shopAddress || '' },
   { header: 'Aadhaar Address', get: (l) => l.aadhaarAddress || '' },
+  { header: 'Final Referral Code', get: (l) => l.finalReferralCode || '' },
   { header: 'Refund Status', get: (l) => (l.status === 'refunded' ? 'Refunded' : '') },
   { header: 'Refund Amount', get: (l) => (l.refund?.amount != null ? l.refund.amount / 100 : '') },
   { header: 'Refund UTR', get: (l) => l.refund?.utr || '' },
@@ -585,6 +586,16 @@ export const markRefunded = asyncHandler(async (req, res) => {
   await PincodeReservation.findOneAndDelete({
     pincode: lead.pincode,
     bookingId: lead._id,
+  });
+
+  await sendDistributorRefundEmail({
+    to: lead.email,
+    name: lead.name,
+    pincode: lead.pincode,
+    district: lead.district,
+    state: lead.state,
+    amount: refundAmount,
+    utr: trimmedUtr,
   });
 
   res.status(200).json({ success: true, data: lead });

@@ -293,7 +293,7 @@ export const verifyExistingBookingOtp = asyncHandler(async (req, res) => {
 // confirmed rule, only an admin approving this UTR can move status to
 // 'activated'. Submitting here just queues it for review.
 export const submitFinalUtr = asyncHandler(async (req, res) => {
-  const { bookingId, utr, panCard, aadhaarAddress, shopName, shopAddress } = req.body;
+  const { bookingId, utr, panCard, aadhaarAddress, shopName, shopAddress, referralCode } = req.body;
 
   if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
     const error = new Error('Invalid bookingId');
@@ -374,6 +374,7 @@ export const submitFinalUtr = asyncHandler(async (req, res) => {
   lead.aadhaarAddress = trimmedAadhaarAddress;
   lead.shopName = trimmedShopName;
   lead.shopAddress = trimmedShopAddress;
+  lead.finalReferralCode = (referralCode || '').trim();
 
   lead.payments.push({
     stage: 'final',
