@@ -12,8 +12,10 @@ import {
   findExistingBooking,
   sendExistingBookingOtp,
   verifyExistingBookingOtp,
+  uploadAadhaarImage,
   submitFinalUtr,
 } from '../controllers/distributor.controller.js';
+import { uploadImage } from '../middlewares/upload.js';
 
 const router = express.Router();
 
@@ -38,6 +40,7 @@ router.post('/nearby-pincodes', getNearbyPincodes);
 router.post('/find-existing-booking', findExistingBooking);
 router.post('/existing-booking/send-otp', sendExistingBookingOtp);
 router.post('/existing-booking/verify-otp', verifyExistingBookingOtp);
+router.post('/existing-booking/upload-aadhaar', uploadImage.single('image'), uploadAadhaarImage);
 router.post('/existing-booking/submit-final-utr', submitFinalUtr);
 
 // Razorpay calls this directly — no user-facing rate limit concerns beyond

@@ -81,6 +81,16 @@ const distributorLeadSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+    aadhaarFrontUrl: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    aadhaarBackUrl: {
+      type: String,
+      trim: true,
+      default: '',
+    },
 
     consents: {
       nonRefundable: { type: Boolean, default: false },

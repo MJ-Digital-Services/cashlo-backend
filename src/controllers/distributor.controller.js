@@ -12,6 +12,7 @@ import { createRazorpayOrder, verifyPaymentSignature, verifyWebhookSignature } f
 import { config } from '../config/environment.js';
 import WebhookLog from '../models/WebhookLog.js';
 import { checkEmailValidity } from '../utils/emailVerification.js';
+import { uploadFile } from '../services/s3.service.js';
 
 const PINCODE_REGEX = /^\d{6}$/;
 const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
@@ -287,6 +288,59 @@ export const verifyExistingBookingOtp = asyncHandler(async (req, res) => {
   });
 });
 
+// POST /api/v1/distributor/existing-booking/upload-aadhaar
+// Uploads a single Aadhaar image (front or back) for the final-payment step
+// and stores its R2 URL directly on the lead. Deliberately separate from
+// submitFinalUtr so the frontend can upload+preview each side immediately
+// on file selection, rather than holding files in memory until final submit.
+export const uploadAadhaarImage = asyncHandler(async (req, res) => {
+  const { bookingId, side } = req.body;
+
+  if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
+    const error = new Error('Invalid bookingId');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (side !== 'front' && side !== 'back') {
+    const error = new Error('side must be "front" or "back"');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!req.file) {
+    const error = new Error('No image file was uploaded');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await DistributorLead.findById(bookingId);
+  if (!lead || lead.status !== 'paid') {
+    const error = new Error('This booking is not eligible for final payment');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const { publicUrl } = await uploadFile(
+    req.file.buffer,
+    req.file.originalname,
+    req.file.mimetype,
+    'distributor/aadhaar'
+  );
+
+  if (side === 'front') {
+    lead.aadhaarFrontUrl = publicUrl;
+  } else {
+    lead.aadhaarBackUrl = publicUrl;
+  }
+  await lead.save();
+
+  res.status(200).json({
+    success: true,
+    data: { bookingId: lead._id, side, url: publicUrl },
+  });
+});
+
 // POST /api/v1/distributor/existing-booking/submit-final-utr
 // QR/UTR final payment for the "Complete Payment for Existing PIN" flow.
 // Mirrors submitUtr's pattern, but does NOT touch lead.status — per the
@@ -328,6 +382,12 @@ export const submitFinalUtr = asyncHandler(async (req, res) => {
   const lead = await DistributorLead.findById(bookingId);
   if (!lead || lead.status !== 'paid') {
     const error = new Error('This booking is not eligible for final payment');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!lead.aadhaarFrontUrl || !lead.aadhaarBackUrl) {
+    const error = new Error('Please upload both the front and back images of your Aadhaar card');
     error.statusCode = 400;
     throw error;
   }
