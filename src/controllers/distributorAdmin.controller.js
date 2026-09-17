@@ -466,13 +466,17 @@ export const rejectFinalUtr = asyncHandler(async (req, res) => {
 // PATCH /api/v1/admin/distributor/leads/:id/mark-refunded
 // Admin-only manual refund marker — no payment gateway integration, this
 // just records that money was returned outside the system (bank transfer,
-// UPI, etc). Only allowed while idCreated is false: once a distributor ID
-// exists downstream, refund is permanently blocked here — same one-way
-// reasoning as idCreated itself. Releases the pincode reservation
-// (locked or confirmed) so it becomes bookable by someone else again.
+// UPI, wallet, etc). Only allowed while idCreated is false: once a
+// distributor ID exists downstream, refund is permanently blocked here —
+// same one-way reasoning as idCreated itself. Releases the pincode
+// reservation (locked or confirmed) so it becomes bookable by someone else
+// again.
+// body.method: 'wallet' switches the requirement from a formal UTR (wallet
+// refunds often don't have one) to a freeform paymentInfo note instead.
 export const markRefunded = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { utr, remark } = req.body;
+  const { utr, paymentInfo, remark } = req.body;
+  const isWalletRefund = req.body.method === 'wallet';
 
   if (!mongoose.isValidObjectId(id)) {
     const error = new Error('Invalid lead id');
@@ -481,9 +485,23 @@ export const markRefunded = asyncHandler(async (req, res) => {
   }
 
   const trimmedUtr = (utr || '').trim();
+  const trimmedPaymentInfo = (paymentInfo || '').trim();
   const trimmedRemark = (remark || '').trim();
 
-  if (!trimmedUtr || !REFUND_UTR_REGEX.test(trimmedUtr)) {
+  if (isWalletRefund) {
+    if (!trimmedPaymentInfo) {
+      const error = new Error('Payment information is required for a wallet refund');
+      error.statusCode = 400;
+      throw error;
+    }
+    // A UTR is optional here, but if the admin did supply one, still hold
+    // it to the same format so it stays meaningful for the uniqueness check.
+    if (trimmedUtr && !REFUND_UTR_REGEX.test(trimmedUtr)) {
+      const error = new Error('The UTR / transaction reference number entered is not valid');
+      error.statusCode = 400;
+      throw error;
+    }
+  } else if (!trimmedUtr || !REFUND_UTR_REGEX.test(trimmedUtr)) {
     const error = new Error('A valid UTR / transaction reference number is required for refund');
     error.statusCode = 400;
     throw error;
@@ -525,20 +543,23 @@ export const markRefunded = asyncHandler(async (req, res) => {
   // App-level uniqueness check across every place a UTR can live — same
   // reasoning as submitUtr/submitFinalUtr, since refund.utr can't carry a
   // meaningful unique constraint check any other way before the save-time
-  // sparse index catches a true race.
-  const utrAlreadyUsed = await DistributorLead.findOne({
-    $or: [
-      { 'qrPayment.utr': trimmedUtr },
-      { 'payments.utr': trimmedUtr },
-      { 'refund.utr': trimmedUtr },
-    ],
-  });
-  if (utrAlreadyUsed) {
-    const error = new Error(
-      'This transaction reference number has already been used elsewhere. If you believe this is a mistake, please contact support.'
-    );
-    error.statusCode = 409;
-    throw error;
+  // sparse index catches a true race. Skipped entirely for a wallet refund
+  // with no UTR supplied — nothing to collide with.
+  if (trimmedUtr) {
+    const utrAlreadyUsed = await DistributorLead.findOne({
+      $or: [
+        { 'qrPayment.utr': trimmedUtr },
+        { 'payments.utr': trimmedUtr },
+        { 'refund.utr': trimmedUtr },
+      ],
+    });
+    if (utrAlreadyUsed) {
+      const error = new Error(
+        'This transaction reference number has already been used elsewhere. If you believe this is a mistake, please contact support.'
+      );
+      error.statusCode = 409;
+      throw error;
+    }
   }
 
   // Refund amount is always derived from the ledger, never admin-entered —
@@ -556,7 +577,9 @@ export const markRefunded = asyncHandler(async (req, res) => {
   const previousStatus = lead.status;
 
   lead.refund = {
-    utr: trimmedUtr,
+    method: isWalletRefund ? 'wallet' : 'bank_transfer',
+    utr: trimmedUtr || undefined,
+    paymentInfo: isWalletRefund ? trimmedPaymentInfo : '',
     remark: trimmedRemark,
     amount: refundAmount,
     previousStatus,
@@ -595,7 +618,9 @@ export const markRefunded = asyncHandler(async (req, res) => {
     district: lead.district,
     state: lead.state,
     amount: refundAmount,
+    method: lead.refund.method,
     utr: trimmedUtr,
+    paymentInfo: trimmedPaymentInfo,
   });
 
   res.status(200).json({ success: true, data: lead });

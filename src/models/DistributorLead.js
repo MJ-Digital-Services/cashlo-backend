@@ -232,7 +232,12 @@ const distributorLeadSchema = new mongoose.Schema(
     // admin-entered — it's computed server-side from payments[] at the
     // moment of refund, so it always matches exactly what was collected.
     refund: {
-      utr: { type: String, trim: true },
+      // 'bank_transfer' covers the original UTR-based flow; 'wallet' skips
+      // UTR entirely (wallet refunds often have no formal reference number)
+      // and requires paymentInfo instead — see markRefunded.
+      method: { type: String, enum: ['bank_transfer', 'wallet'], default: 'bank_transfer' },
+      utr: { type: String, trim: true }, // required only when method === 'bank_transfer'
+      paymentInfo: { type: String, trim: true, default: '' }, // required only when method === 'wallet' — freeform, not UTR-format-validated
       remark: { type: String, trim: true, default: '' },
       amount: Number, // paise — sum of payments[] with status: 'success' at refund time
       previousStatus: { type: String, trim: true }, // 'paid' | 'activated' | 'lock_lost' — audit trail

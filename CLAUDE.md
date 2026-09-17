@@ -142,14 +142,50 @@ verification, webhook signature verification, `fetchOrderPayments`.
   reverted and **permanently blocks refunds** (`markRefunded` checks
   `lead.idCreated`).
 
-### 5. DistributorLead status enum
+### 5. Refund (admin-only, manual — no payment gateway integration)
+
+`markRefunded` (`PATCH /admin/distributor/leads/:id/mark-refunded`,
+`distributorAdmin.controller.js`) just records that money was returned
+outside the system; it never actually moves money.
+
+- Eligible only when `idCreated === false` (permanent block, same
+  one-way reasoning as `idCreated` itself) and `status` is one of `paid`,
+  `activated`, `lock_lost`. Already-`refunded` leads are rejected.
+- **Refund amount is never admin-entered** — always
+  `sum(payments[] where status === 'success')`, computed server-side.
+- `body.method`: `'bank_transfer'` (default) requires a UTR matching
+  `^[A-Za-z0-9]{6,22}$`; `'wallet'` requires `paymentInfo` (freeform, no
+  format validation) instead and makes UTR fully optional — added because
+  wallet refunds often have no formal transaction reference, and admins
+  were being forced to stuff notes into the UTR field where they failed
+  validation. UTR-uniqueness check (across `qrPayment.utr` / `payments.utr`
+  / `refund.utr`) is skipped entirely when no UTR is supplied.
+- On success: writes `lead.refund = { method, utr, paymentInfo, remark,
+  amount, previousStatus, refundedBy, refundedAt }`, sets
+  `status: 'refunded'`, `leadCallStatus: 'not_required'`, **deletes the
+  `PincodeReservation` outright** (`findOneAndDelete`, no status filter —
+  works whether it was `locked` or `confirmed`) so the pincode becomes
+  bookable again, then sends `sendDistributorRefundEmail`. No PDF
+  receipt is generated or voided for a refund (unlike activation).
+- Admin UI: `MarkRefundedModal.tsx` (`cashlo-admin`) — a "Wallet refunded"
+  checkbox switches the single reference-input field between UTR (strict
+  format) and Payment Information (freeform); its client-side UTR regex
+  must be kept in sync with `REFUND_UTR_REGEX` in the controller, since
+  there is no shared-package way to enforce that automatically.
+- Any UI that renders `lead.refund` must branch on `refund.method` —
+  `refund.utr` is `undefined` for a wallet refund, so unconditionally
+  printing it produces `"UTR: undefined"` (this happened in both
+  `LeadInfoCards.tsx`'s `StatusCard` and `lib/leadTimeline.ts` before
+  being fixed; watch for the same mistake in any new refund display).
+
+### 6. DistributorLead status enum
 
 ```
 form_submitted → otp_sent → otp_verified → lock_acquired → order_created → paid → activated
 ```
 Side branches: `failed`, `expired`, `cancelled`, `lock_lost`, `refunded`.
 
-### 6. Admin dashboard (cashlo-admin)
+### 7. Admin dashboard (cashlo-admin)
 
 `src/app/(dashboard)/leads/*` mirrors the backend status enum and filters
 1:1 via `buildLeadsFilter` (`distributorAdmin.controller.js`). Per-lead
@@ -160,7 +196,8 @@ admin actions, all behind `protect` + `restrictTo('admin','sales')`:
 - `approveUtr` / `rejectUtr` — booking-stage QR/UTR review
 - `approveFinalUtr` / `rejectFinalUtr` — **the activation action**
 - `updateIdCreated` — post-activation distributor-ID flag
-- `markRefunded`, `cancel`, `updateCallStatus`, CSV `exportLeads`
+- `markRefunded` (see Refund above), `cancel`, `updateCallStatus`, CSV
+  `exportLeads`
 
 ## Key files (this repo)
 
@@ -175,7 +212,15 @@ admin actions, all behind `protect` + `restrictTo('admin','sales')`:
 - `src/utils/paymentReconciliation.js` — `markLeadPaid()`.
 - `src/controllers/distributor.controller.js` — public booking endpoints.
 - `src/controllers/distributorAdmin.controller.js` — admin review/activation endpoints.
-- `src/services/razorpay.service.js`, `src/services/receipt.service.js`, `src/services/email.service.js`.
+- `src/services/razorpay.service.js`, `src/services/receipt.service.js`,
+  `src/services/email.service.js` — every `send*Email` function goes
+  through a single wrapped `transporter.sendMail`; in `NODE_ENV=development`
+  (the local `.env` default) this is suppressed entirely and logs a
+  one-line `to`/`subject` summary instead of hitting real SES — no code
+  change needed elsewhere to keep this true for new email functions.
+  `sendOtpEmail` additionally console-logs the raw OTP in development
+  (`🔑 [dev] OTP for ...`) since that one email actually needs to be
+  readable to test the flow locally.
 - `src/jobs/reconcilePayments.job.js` — cron safety net for stuck payments.
 
 ## Working conventions

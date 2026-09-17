@@ -3,7 +3,7 @@ import { config } from '../config/environment.js';
 
 // SES SMTP — sends as noreply@cashlo.app (domain-verified, DKIM signed).
 // Daily quota: 50,000/day, 14 emails/sec (production access granted).
-const transporter = nodemailer.createTransport({
+const realTransporter = nodemailer.createTransport({
   host: config.smtp.host,
   port: config.smtp.port,
   secure: config.smtp.port === 465,
@@ -13,8 +13,28 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// Single choke point for every outgoing email — in local development this
+// suppresses the actual send (no real inbox should ever receive test
+// emails from a dev machine) while still logging what would have gone out,
+// so the rest of each send*Email function below never needs to know about
+// this gate.
+const transporter = {
+  sendMail: async (options) => {
+    if (config.nodeEnv === 'development') {
+      console.log(`📧 [dev] Email suppressed — to: ${options.to} · subject: "${options.subject}"`);
+      return;
+    }
+    return realTransporter.sendMail(options);
+  },
+};
+
 export const sendOtpEmail = async ({ to, name, otp }) => {
   try {
+    // Emails are suppressed in development (see `transporter` above) — log
+    // the OTP directly so local testing doesn't require a real inbox.
+    if (config.nodeEnv === 'development') {
+      console.log(`🔑 [dev] OTP for ${to}: ${otp}`);
+    }
     await transporter.sendMail({
       from: `"${config.smtp.fromName}" <${config.smtp.fromEmail}>`,
       to,
@@ -171,8 +191,24 @@ export const sendDistributorActivationEmail = async ({ to, name, pincode, distri
   }
 };
 
-export const sendDistributorRefundEmail = async ({ to, name, pincode, district, state, amount, utr }) => {
+export const sendDistributorRefundEmail = async ({ to, name, pincode, district, state, amount, method, utr, paymentInfo }) => {
   try {
+    const isWalletRefund = method === 'wallet';
+    const creditLine = isWalletRefund
+      ? 'The refund amount will be credited to your wallet shortly.'
+      : 'The refund amount will be credited to your bank account within 2–3 business days.';
+    const referenceRow = isWalletRefund
+      ? `
+                  <tr>
+                    <td style="padding: 6px 0; font-size: 13px; color: #6b7280;">Payment Info</td>
+                    <td style="padding: 6px 0; font-size: 13px; color: #111827; font-weight: 500; text-align: right;">${paymentInfo}</td>
+                  </tr>`
+      : `
+                  <tr>
+                    <td style="padding: 6px 0; font-size: 13px; color: #6b7280;">Refund UTR</td>
+                    <td style="padding: 6px 0; font-size: 13px; color: #111827; font-weight: 500; text-align: right; font-family: monospace;">${utr}</td>
+                  </tr>`;
+
     await transporter.sendMail({
       from: `"${config.smtp.fromName}" <${config.smtp.fromEmail}>`,
       to,
@@ -194,7 +230,7 @@ export const sendDistributorRefundEmail = async ({ to, name, pincode, district, 
               </div>
 
                             <p style="font-size: 15px; line-height: 1.6; color: #4b5563; margin: 0 0 24px;">
-                We've processed your refund for PIN Code <strong style="color: #111827;">${pincode}</strong> (${district}, ${state}). This PIN Code reservation has now been released. The refund amount will be credited to your bank account within 2–3 business days.
+                We've processed your refund for PIN Code <strong style="color: #111827;">${pincode}</strong> (${district}, ${state}). This PIN Code reservation has now been released. ${creditLine}
               </p>
 
               <!-- Details card -->
@@ -203,11 +239,7 @@ export const sendDistributorRefundEmail = async ({ to, name, pincode, district, 
                   <tr>
                     <td style="padding: 6px 0; font-size: 13px; color: #6b7280;">Refund Amount</td>
                     <td style="padding: 6px 0; font-size: 14px; color: #111827; font-weight: 600; text-align: right;">₹${(amount / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 6px 0; font-size: 13px; color: #6b7280;">Refund UTR</td>
-                    <td style="padding: 6px 0; font-size: 13px; color: #111827; font-weight: 500; text-align: right; font-family: monospace;">${utr}</td>
-                  </tr>
+                  </tr>${referenceRow}
                 </table>
               </div>
 
