@@ -39,4 +39,12 @@ export const config = {
     // run both simultaneously, pick one.
     qrPaymentMode: process.env.DISTRIBUTOR_QR_PAYMENT_MODE === 'true',
   },
+  cms: {
+    // The Payload CMS (cashlo-cms / cms.cashlo.app) that owns blog content.
+    // Unrelated to this backend's own data — only used to trigger its
+    // scheduled-publish job runner, since cms.cashlo.app runs on Vercel
+    // (serverless) and has no persistent process of its own to tick a cron.
+    url: process.env.CMS_URL || 'https://cms.cashlo.app',
+    cronSecret: process.env.CMS_CRON_SECRET,
+  },
 };
