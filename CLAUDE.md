@@ -222,6 +222,22 @@ admin actions, all behind `protect` + `restrictTo('admin','sales')`:
   (`🔑 [dev] OTP for ...`) since that one email actually needs to be
   readable to test the flow locally.
 - `src/jobs/reconcilePayments.job.js` — cron safety net for stuck payments.
+- `src/jobs/triggerCmsScheduledPublish.job.js` — every 5 min, pings
+  `cms.cashlo.app`'s job-run endpoint (`CMS_CRON_SECRET` env var required,
+  no-ops silently if unset). Unrelated to this backend's own data — the
+  blog CMS (`cashlo-cms`, a separate repo) runs on Vercel's serverless
+  runtime and has no persistent process of its own to tick its
+  scheduled-publish queue, so this backend's existing persistent
+  node-cron infrastructure does it instead. See `cashlo-cms/CLAUDE.md`
+  "Scheduled Publishing" for the full picture.
+
+**Blog is legacy here.** `src/models/Blog.js`, `src/controllers/blog.controller.js`,
+`src/services/blog.service.js`, `src/routes/blog.routes.js` are the
+*old* blog system — blog content now lives in `cashlo-cms` (separate
+Payload CMS repo, `cms.cashlo.app`), and `cashlo-final` no longer calls
+this backend's `/api/v1/blogs` endpoints. These files are unretired only
+because `cashlo-admin`'s Blogs tab still points at them — don't build new
+blog features here; they belong in `cashlo-cms` instead.
 
 ## Working conventions
 
