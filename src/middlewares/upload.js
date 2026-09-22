@@ -16,6 +16,15 @@ export const uploadImage = multer({
   fileFilter: fileFilter(['image/jpeg', 'image/png', 'image/webp', 'image/gif']),
 });
 
+// Blog images get a tighter 2MB cap than the shared 5MB `uploadImage` above
+// (which stays at 5MB for Aadhaar photo uploads) — separate multer instance
+// so this limit only applies to blog image uploads.
+export const uploadBlogImageFile = multer({
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: fileFilter(['image/jpeg', 'image/png', 'image/webp', 'image/gif']),
+});
+
 export const uploadPdf = multer({
   storage,
   limits: { fileSize: 20 * 1024 * 1024 },
