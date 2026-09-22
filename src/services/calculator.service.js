@@ -30,3 +30,7 @@ export const findFeatured = async (limit = 10) => {
 export const findAllSlugs = async () => {
   return Calculator.find({ isActive: true }).select('slug -_id');
 };
+
+export const findAllForSitemap = async () => {
+  return Calculator.find({ isActive: true }).select('slug updatedAt -_id');
+};

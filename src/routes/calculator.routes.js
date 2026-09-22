@@ -2,6 +2,7 @@ import express from 'express';
 import {
   getAllTypes,
   getAllSlugs,
+  getSitemapData,
   getFeatured,
   getBySlug,
   createCalculator,
@@ -18,6 +19,7 @@ const router = express.Router();
 // Public — consumed by the Next.js frontend
 router.get('/types', getAllTypes);
 router.get('/slugs', getAllSlugs);
+router.get('/sitemap', getSitemapData);
 router.get('/featured', getFeatured);
 router.get('/:slug', getBySlug);
 

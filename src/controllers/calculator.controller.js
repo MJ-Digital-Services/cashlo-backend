@@ -15,6 +15,15 @@ export const getAllSlugs = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, data: slugs.map((s) => s.slug) });
 });
 
+// GET /api/v1/calculators/sitemap  → slug + updatedAt for sitemap-calculators.xml's <lastmod>
+export const getSitemapData = asyncHandler(async (req, res) => {
+  const items = await calculatorService.findAllForSitemap();
+  res.status(200).json({
+    success: true,
+    data: items.map((c) => ({ slug: c.slug, updatedAt: c.updatedAt })),
+  });
+});
+
 // GET /api/v1/calculators/featured  → for nav dropdown / sidebar "Popular Calculators"
 export const getFeatured = asyncHandler(async (req, res) => {
   const items = await calculatorService.findFeatured();
