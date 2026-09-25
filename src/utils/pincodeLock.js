@@ -1,7 +1,11 @@
 import PincodeReservation from '../models/PincodeReservation.js';
 
 const LOCK_DURATION_MS = 15 * 60 * 1000; // 15 minutes
-export const QR_REVIEW_LOCK_DURATION_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+// durationMs: null → a lock with no expiresAt, which the TTL index never
+// removes. That's what submitUtr uses: once a customer has paid and
+// submitted a UTR, only an admin decision (approve / reject / refund) ends
+// the lock.
 
 export const acquirePincodeLock = async ({ pincode, bookingId, durationMs = LOCK_DURATION_MS }) => {
   const now = new Date();

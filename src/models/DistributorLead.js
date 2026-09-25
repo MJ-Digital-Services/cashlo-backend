@@ -117,6 +117,12 @@ const distributorLeadSchema = new mongoose.Schema(
     },
     otpVerifiedAt: Date,
 
+    // Live flow: otp_sent → otp_verified → lock_acquired (UTR under review)
+    // → paid (booking plan) → activated; or lock_acquired → activated (full
+    // plan). Side exits: cancelled (payment rejected), refunded, lock_lost
+    // (UTR submitted after the pincode was taken). form_submitted,
+    // order_created, failed and expired are Razorpay-era values kept only
+    // for old documents.
     status: {
       type: String,
       enum: [
@@ -136,20 +142,25 @@ const distributorLeadSchema = new mongoose.Schema(
       default: 'form_submitted',
     },
 
-    razorpay: {
-      orderId: String,
-      paymentId: String,
-      signature: String,
-      amount: Number, // paise
-      currency: { type: String, default: 'INR' },
-      receipt: String,
+    // Which pricing plan this lead is on — see src/config/distributorFees.js.
+    // Set at UTR submission. Leads from before plans existed have no value
+    // and are treated as 'booking' (planOf()).
+    plan: {
+      type: String,
+      enum: ['booking', 'full'],
     },
+    // QR + UTR is the only payment method. 'razorpay' and 'manual' are kept
+    // in the enum only so old documents still validate — nothing writes
+    // them any more. No default: a lead has no payment method until it
+    // verifies OTP.
     paymentMethod: {
       type: String,
       enum: ['razorpay', 'manual', 'qr_self'],
-      default: 'razorpay',
     },
 
+    // LEGACY (read-only): admin-collected offline payments from the retired
+    // manual mode, and QR approvals from before payments[] became the
+    // source of truth. Nothing writes this any more.
     manualPayment: {
       mode: { type: String, enum: ['cash', 'qr', 'bank_transfer', 'other'] },
       reference: { type: String, trim: true, default: '' },
@@ -158,11 +169,10 @@ const distributorLeadSchema = new mongoose.Schema(
       collectedAt: Date,
     },
 
-    // Self-serve QR + UTR flow: customer scans a static QR, pays externally,
-    // then submits the UTR themselves. Distinct from `manualPayment` above,
-    // which is for admin-collected payments over a phone call. On approval,
-    // this gets folded into `manualPayment` (mode: 'qr') so markLeadPaid()
-    // and the receipt/email logic don't need to know this flow exists.
+    // LEGACY (read-only except for review-status bookkeeping): booking-stage
+    // UTRs submitted before payments[] became the single source of truth.
+    // New submissions only write a payments[] entry. The sparse unique index
+    // on qrPayment.utr below stays for these old records.
     qrPayment: {
       utr: { type: String, trim: true },
       submittedAt: Date,
@@ -178,24 +188,24 @@ const distributorLeadSchema = new mongoose.Schema(
     gst: {
       baseAmount: Number,
       gstAmount: Number,
-      totalAmount: Number, // set explicitly by createOrder once a real order exists — never defaulted here
-    },
+      totalAmount: Number,
+    }, // breakdown of the first payment for this lead's plan (₹1,180 booking or ₹6,490 full)
     
-    // Snapshot of the full distributor fee at the time the booking payment
-    // succeeded. Stored per-lead so a future fee change never alters what
-    // an already-paid distributor owes for final activation.
+    // Snapshot of the plan's total fee (₹7,080 booking plan / ₹6,490 full
+    // plan), taken when the plan is chosen at UTR submission. Stored per-lead
+    // so a future fee change never alters what an existing lead owes.
     totalDistributorFee: {
       type: Number, // paise, inclusive of GST
     },
 
-        // Ledger of successful/failed payments across both stages (booking +
-    // final). Existing `razorpay` / `qrPayment` / `manualPayment` fields
-    // stay untouched for the booking stage — this array is the source of
-    // truth for computing pendingAmount = totalDistributorFee - sum(success).
+    // Ledger of every payment across all stages — the single source of
+    // truth. Each UTR submission adds a 'pending' entry that an admin
+    // approves or rejects (src/utils/distributorPayments.js).
+    // pendingAmount = totalDistributorFee - sum(success).
     payments: [
       {
-        stage: { type: String, enum: ['booking', 'final'], required: true },
-        method: { type: String, enum: ['razorpay', 'qr_self', 'manual'], required: true },
+        stage: { type: String, enum: ['booking', 'final', 'full'], required: true },
+        method: { type: String, enum: ['razorpay', 'qr_self', 'manual'], required: true }, // only 'qr_self' is written now
         amount: { type: Number, required: true }, // paise
         status: { type: String, enum: ['pending', 'success', 'failed'], required: true },
         orderId: String,
@@ -209,10 +219,8 @@ const distributorLeadSchema = new mongoose.Schema(
       },
     ],
 
-    // Set only when an admin manually triggers activation (final payment
-    // collected offline). Self-service final payment via Razorpay does not
-    // set these — that path is identified by payments[] having a 'final'
-    // entry with method: 'razorpay' instead.
+    // Set by the admin approval that activates the lead (final payment on
+    // the booking plan, or the single payment on the full plan).
     activatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     activatedAt: Date,
     
@@ -288,7 +296,6 @@ distributorLeadSchema.index({ mobile: 1 });
 distributorLeadSchema.index({ pincode: 1 });
 distributorLeadSchema.index({ status: 1 });
 distributorLeadSchema.index({ leadCallStatus: 1 });
-distributorLeadSchema.index({ 'razorpay.orderId': 1 });
 // Sparse: only leads that actually submitted a UTR have this field, so the
 // uniqueness constraint doesn't apply to (and reject) every other document
 // that lacks one.

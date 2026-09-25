@@ -6,7 +6,7 @@ import { config } from '../config/environment.js';
 // has no persistent process to tick that on its own — Payload's job queue
 // just sits there until something externally pings its run endpoint. This
 // backend already runs as a persistent Render service with node-cron in
-// use (see reconcilePayments.job.js), so it does the pinging instead of
+// use, so it does the pinging instead of
 // standing up a separate cron service just for this.
 export const triggerCmsScheduledPublish = async () => {
   if (!config.cms.cronSecret) return; // not configured — skip silently

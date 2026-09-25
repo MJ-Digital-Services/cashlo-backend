@@ -79,8 +79,8 @@ export const generateReceiptPdfBuffer = (data) => {
 
     y += 40;
     doc.fontSize(9).font('Helvetica').fillColor('#888888');
-    doc.text(`Payment ID: ${data.paymentId}`, 50, y);
-    doc.text(`Order ID: ${data.orderId}`, 320, y);
+    doc.text(`UTR / Reference: ${data.paymentId}`, 50, y);
+    doc.text(`Payment: ${data.orderId}`, 320, y);
 
     y += 40;
     doc

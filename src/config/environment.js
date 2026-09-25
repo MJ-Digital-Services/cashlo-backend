@@ -25,20 +25,6 @@ export const config = {
   quickEmailVerification: {
     apiKey: process.env.QUICK_EMAIL_VERIFICATION_API_KEY,
   },
-  razorpay: {
-    keyId: process.env.RAZORPAY_KEY_ID,
-    keySecret: process.env.RAZORPAY_KEY_SECRET,
-    // Configured separately in the Razorpay dashboard under Webhooks —
-    // different secret than keySecret above. See HLD Section 4b.
-    webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET,
-  },
-  distributor: {
-    manualPaymentMode: process.env.DISTRIBUTOR_MANUAL_PAYMENT_MODE === 'true',
-    // Self-serve QR + UTR flow. If both this and manualPaymentMode are set
-    // true at once, qrPaymentMode wins (checked first in verifyOtp) — don't
-    // run both simultaneously, pick one.
-    qrPaymentMode: process.env.DISTRIBUTOR_QR_PAYMENT_MODE === 'true',
-  },
   cms: {
     // The Payload CMS (cashlo-cms / cms.cashlo.app) that owns blog content.
     // Unrelated to this backend's own data — only used to trigger its

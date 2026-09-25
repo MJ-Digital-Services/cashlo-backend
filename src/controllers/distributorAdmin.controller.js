@@ -1,12 +1,9 @@
 import mongoose from 'mongoose';
 import DistributorLead from '../models/DistributorLead.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
-import WebhookLog from '../models/WebhookLog.js';
 import PincodeReservation from '../models/PincodeReservation.js';
-import { markLeadPaid } from '../utils/paymentReconciliation.js';
-import { sendDistributorActivationEmail, sendDistributorRefundEmail } from '../services/email.service.js';
-import { generateReceiptPdfBuffer } from '../services/receipt.service.js';
-import { uploadFile } from '../services/s3.service.js';
+import { sendDistributorRefundEmail } from '../services/email.service.js';
+import { approvePendingPayment, rejectPendingPayment, sumPayments } from '../utils/distributorPayments.js';
 
 const ALLOWED_CALL_STATUSES = ['not_required', 'pending_call', 'called', 'converted'];
 const REFUND_UTR_REGEX = /^[A-Za-z0-9]{6,22}$/;
@@ -34,19 +31,24 @@ function istDayEndUtc(dateStr) {
 }
 
 function buildLeadsFilter(query) {
-  const { status, leadCallStatus, paymentMethod, search, startDate, endDate } = query;
+  const { status, leadCallStatus, paymentMethod, plan, search, startDate, endDate } = query;
 
   const filter = {};
   if (status) filter.status = status;
   if (leadCallStatus) filter.leadCallStatus = leadCallStatus;
   if (paymentMethod) filter.paymentMethod = paymentMethod;
+  // Leads from before plans existed have no `plan` — they're booking-plan.
+  if (plan === 'booking') filter.plan = { $in: ['booking', null] };
+  if (plan === 'full') filter.plan = 'full';
   if (query.pendingFinalReview === 'true') {
     filter.status = 'paid';
     filter.payments = { $elemMatch: { stage: 'final', status: 'pending' } };
   }
+  // Every lock_acquired lead has a booking or full-plan UTR awaiting review
+  // (QR is the only payment method, and lock_acquired is only set by
+  // submitUtr) — including legacy leads whose UTR lives on qrPayment.
   if (query.pendingBookingReview === 'true') {
-    filter.paymentMethod = 'qr_self';
-    filter['qrPayment.reviewStatus'] = 'pending';
+    filter.status = 'lock_acquired';
   }
   if (query.pendingIdCreation === 'true') {
     filter.status = 'activated';
@@ -139,6 +141,7 @@ const CSV_COLUMNS = [
   { header: 'State', get: (l) => l.state },
   { header: 'Status', get: (l) => l.status },
   { header: 'Call Status', get: (l) => l.leadCallStatus },
+  { header: 'Plan', get: (l) => (l.plan === 'full' ? 'Full' : 'Booking') },
   { header: 'Payment Method', get: (l) => l.paymentMethod || '' },
   { header: 'Total Distributor Fee', get: (l) => (l.totalDistributorFee != null ? l.totalDistributorFee / 100 : '') },
   { header: 'Shop Name', get: (l) => l.shopName || '' },
@@ -181,6 +184,53 @@ export const exportLeads = asyncHandler(async (req, res) => {
   res.status(200).send(csv);
 });
 
+// PATCH /api/v1/admin/distributor/leads/:id/approve-payment
+// Approves the lead's single pending payments[] entry, whatever its stage:
+// booking → 'paid', full or final → 'activated'. See distributorPayments.js.
+export const approvePayment = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  if (!mongoose.isValidObjectId(id)) {
+    const error = new Error('Invalid lead id');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await approvePendingPayment({ leadId: id, adminId: req.user._id });
+
+  res.status(200).json({
+    success: true,
+    message: lead.status === 'activated'
+      ? 'Payment approved. Distributor PIN Code is now activated.'
+      : 'Payment approved and PIN Code confirmed for this distributor.',
+    data: lead,
+  });
+});
+
+// PATCH /api/v1/admin/distributor/leads/:id/reject-payment
+// Rejects the lead's pending payment. Booking/full → lead 'cancelled' and
+// pincode released; final → lead stays 'paid' and can resubmit.
+export const rejectPayment = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const reason = (req.body.reason || '').trim();
+
+  if (!mongoose.isValidObjectId(id)) {
+    const error = new Error('Invalid lead id');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!reason) {
+    const error = new Error('A rejection reason is required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lead = await rejectPendingPayment({ leadId: id, adminId: req.user._id, reason });
+
+  res.status(200).json({ success: true, data: lead });
+});
+
 // GET /api/v1/admin/distributor/leads/:id
 export const getLead = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -197,268 +247,6 @@ export const getLead = asyncHandler(async (req, res) => {
     error.statusCode = 404;
     throw error;
   }
-
-  res.status(200).json({ success: true, data: lead });
-});
-
-const MANUAL_PAYMENT_MODES = ['cash', 'qr', 'bank_transfer', 'other'];
-
-// PATCH /api/v1/admin/distributor/leads/:id/mark-paid
-// Manual-payment workaround only — sales collected payment outside Razorpay
-// (QR/bank transfer/cash) and admin confirms it here.
-export const markLeadPaidManually = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { mode, reference, notes } = req.body;
-
-  if (!mongoose.isValidObjectId(id)) {
-    const error = new Error('Invalid lead id');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (!MANUAL_PAYMENT_MODES.includes(mode)) {
-    const error = new Error(`mode must be one of: ${MANUAL_PAYMENT_MODES.join(', ')}`);
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const existingLead = await DistributorLead.findById(id);
-  if (!existingLead) {
-    const error = new Error('Lead not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  if (!(existingLead.status === 'lock_acquired' && existingLead.paymentMethod === 'manual') && existingLead.status !== 'lock_lost') {
-    const error = new Error(`Cannot mark this lead as paid from its current state`);
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const { lead, lockLost } = await markLeadPaid({
-    bookingId: id,
-    manualPayment: {
-      mode,
-      reference: reference || '',
-      notes: notes || '',
-      collectedBy: req.user._id,
-      collectedAt: new Date(),
-    },
-    allowRelockIfFree: true,
-  });
-
-  res.status(200).json({
-    success: true,
-    message: lockLost
-      ? 'Payment recorded, but this PIN Code was already taken by another distributor before confirmation. Please arrange a refund.'
-      : 'Payment recorded and PIN Code confirmed for this distributor.',
-    data: { lead, lockLost },
-  });
-});
-
-// PATCH /api/v1/admin/distributor/leads/:id/approve-utr
-// Approves a customer-submitted UTR from the self-serve QR flow. Reuses
-// markLeadPaid() by passing the UTR through as a manualPayment record
-// (mode: 'qr') — same reasoning as markLeadPaidManually below: keeps the
-// receipt/email/lock-confirmation logic in exactly one place.
-export const approveUtr = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  if (!mongoose.isValidObjectId(id)) {
-    const error = new Error('Invalid lead id');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const existingLead = await DistributorLead.findById(id);
-  if (!existingLead) {
-    const error = new Error('Lead not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  if (existingLead.paymentMethod !== 'qr_self') {
-    const error = new Error('This lead did not use the QR self-payment flow');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (existingLead.qrPayment?.reviewStatus !== 'pending') {
-    const error = new Error('There is no pending UTR submission to approve for this lead');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  existingLead.qrPayment.reviewStatus = 'approved';
-  existingLead.qrPayment.reviewedBy = req.user._id;
-  existingLead.qrPayment.reviewedAt = new Date();
-  await existingLead.save();
-
-  const { lead, lockLost } = await markLeadPaid({
-    bookingId: id,
-    manualPayment: {
-      mode: 'qr',
-      reference: existingLead.qrPayment.utr,
-      notes: 'Self-submitted via website QR flow, approved by admin',
-      collectedBy: req.user._id,
-      collectedAt: new Date(),
-    },
-    allowRelockIfFree: true,
-  });
-
-  res.status(200).json({
-    success: true,
-    message: lockLost
-      ? 'UTR approved, but this PIN Code was already taken by another distributor before confirmation. Please arrange a refund.'
-      : 'UTR approved and PIN Code confirmed for this distributor.',
-    data: { lead, lockLost },
-  });
-});
-
-// PATCH /api/v1/admin/distributor/leads/:id/approve-final-utr
-// Approves the final (activation) payment UTR for a lead already at
-// status 'paid'. This is the ONLY way — besides self-service payment,
-// once that's added — that a lead can move from 'paid' to 'activated'.
-export const approveFinalUtr = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  if (!mongoose.isValidObjectId(id)) {
-    const error = new Error('Invalid lead id');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const lead = await DistributorLead.findById(id);
-  if (!lead) {
-    const error = new Error('Lead not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  if (lead.status !== 'paid') {
-    const error = new Error('Only bookings with status "paid" can be activated');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const pendingEntry = lead.payments.find(
-    (p) => p.stage === 'final' && p.status === 'pending'
-  );
-
-  if (!pendingEntry) {
-    const error = new Error('There is no pending final payment submission to approve for this lead');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  pendingEntry.status = 'success';
-  pendingEntry.reviewedBy = req.user._id;
-  pendingEntry.reviewedAt = new Date();
-
-  lead.status = 'activated';
-  lead.activatedBy = req.user._id;
-  lead.activatedAt = new Date();
-
-  await lead.save();
-
-  let activationReceiptUrl = '';
-  try {
-    const pdfBuffer = await generateReceiptPdfBuffer({
-      bookingId: String(lead._id),
-      name: lead.name,
-      mobile: lead.mobile,
-      email: lead.email,
-      pincode: lead.pincode,
-      district: lead.district,
-      state: lead.state,
-      includeGstBreakdown: false,
-      lineItemLabel: 'Distributor Activation Fee (Final Payment)',
-      totalAmount: pendingEntry.amount,
-      paymentId: pendingEntry.utr || 'Final Payment',
-      orderId: `FINAL-${(pendingEntry.method || 'qr_self').toUpperCase()}`,
-      date: new Date().toISOString(),
-    });
-
-    const uploaded = await uploadFile(
-      pdfBuffer,
-      `activation-receipt-${lead._id}.pdf`,
-      'application/pdf',
-      'receipts'
-    );
-    activationReceiptUrl = uploaded.publicUrl;
-    lead.activationReceiptUrl = activationReceiptUrl;
-    await lead.save();
-  } catch (err) {
-    console.error('❌ Failed to generate/upload activation receipt PDF:', err.message);
-  }
-
-  await sendDistributorActivationEmail({
-    to: lead.email,
-    name: lead.name,
-    pincode: lead.pincode,
-    district: lead.district,
-    state: lead.state,
-    totalAmount: lead.totalDistributorFee ?? pendingEntry.amount,
-    receiptUrl: activationReceiptUrl,
-  });
-
-  res.status(200).json({
-    success: true,
-    message: 'Final payment approved. Distributor PIN Code is now activated.',
-    data: lead,
-  });
-});
-
-// PATCH /api/v1/admin/distributor/leads/:id/reject-final-utr
-// Rejects a submitted final-payment UTR. Unlike rejectUtr (booking stage),
-// this does NOT touch lead.status or any pincode lock — status stays 'paid'
-// so the distributor keeps their PIN Code and can simply resubmit a
-// corrected UTR via submitFinalUtr.
-export const rejectFinalUtr = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { reason } = req.body;
-
-  if (!mongoose.isValidObjectId(id)) {
-    const error = new Error('Invalid lead id');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (!reason || !reason.trim()) {
-    const error = new Error('A rejection reason is required');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const lead = await DistributorLead.findById(id);
-  if (!lead) {
-    const error = new Error('Lead not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  if (lead.status !== 'paid') {
-    const error = new Error('This lead is not in a state that has a pending final payment to reject');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const pendingEntry = lead.payments.find(
-    (p) => p.stage === 'final' && p.status === 'pending'
-  );
-
-  if (!pendingEntry) {
-    const error = new Error('There is no pending final payment submission to reject for this lead');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  pendingEntry.status = 'failed';
-  pendingEntry.rejectionReason = reason.trim();
-  pendingEntry.reviewedBy = req.user._id;
-  pendingEntry.reviewedAt = new Date();
-
-  await lead.save();
 
   res.status(200).json({ success: true, data: lead });
 });
@@ -562,16 +350,35 @@ export const markRefunded = asyncHandler(async (req, res) => {
     }
   }
 
+  // A 'lock_lost' lead's pending entry is the payment being refunded (UTR
+  // submitted after the pincode was taken — the agent has confirmed the
+  // money arrived by refunding it). Anywhere else, a pending payment must be
+  // approved or rejected first, or the refund amount would silently exclude
+  // money the customer may have actually paid.
+  const isLockLost = lead.status === 'lock_lost';
+  if (!isLockLost && lead.payments.some((p) => p.status === 'pending')) {
+    const error = new Error('This lead has a payment awaiting review — approve or reject it before refunding');
+    error.statusCode = 400;
+    throw error;
+  }
+
   // Refund amount is always derived from the ledger, never admin-entered —
   // guarantees it matches exactly what was actually collected.
-  const refundAmount = lead.payments
-    .filter((p) => p.status === 'success')
-    .reduce((sum, p) => sum + p.amount, 0);
+  const refundAmount = sumPayments(lead, isLockLost ? ['success', 'pending'] : ['success']);
 
   if (refundAmount <= 0) {
     const error = new Error('No successful payment was found on this lead to refund');
     error.statusCode = 400;
     throw error;
+  }
+
+  if (isLockLost) {
+    for (const p of lead.payments) {
+      if (p.status !== 'pending') continue;
+      p.status = 'success';
+      p.reviewedBy = req.user._id;
+      p.reviewedAt = new Date();
+    }
   }
 
   const previousStatus = lead.status;
@@ -604,8 +411,10 @@ export const markRefunded = asyncHandler(async (req, res) => {
 
   // Release the pincode — whether it was still 'locked' (e.g. a lock_lost
   // lead refunded before ever confirming) or 'confirmed' (paid/activated).
-  // No status filter here deliberately, unlike rejectUtr's narrower delete,
-  // since a refund can legitimately happen from either lock state.
+  // No status filter here deliberately, unlike rejectPendingPayment's
+  // narrower delete, since a refund can legitimately happen from either
+  // lock state. Scoped to this bookingId, so a lock_lost lead never deletes
+  // the reservation of the lead that actually holds the pincode.
   await PincodeReservation.findOneAndDelete({
     pincode: lead.pincode,
     bookingId: lead._id,
@@ -622,101 +431,6 @@ export const markRefunded = asyncHandler(async (req, res) => {
     utr: trimmedUtr,
     paymentInfo: trimmedPaymentInfo,
   });
-
-  res.status(200).json({ success: true, data: lead });
-});
-
-// PATCH /api/v1/admin/distributor/leads/:id/reject-utr
-// Rejects a submitted UTR (couldn't be verified against the bank statement,
-// wrong amount, etc). Routes the lead into the existing pending_call queue
-// so a human follows up — doesn't touch booking status, so the lock (and
-// the customer's ability to resubmit a corrected UTR via submitUtr) stays intact.
-export const rejectUtr = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { reason } = req.body;
-
-  if (!mongoose.isValidObjectId(id)) {
-    const error = new Error('Invalid lead id');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (!reason || !reason.trim()) {
-    const error = new Error('A rejection reason is required');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const lead = await DistributorLead.findById(id);
-  if (!lead) {
-    const error = new Error('Lead not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  if (lead.paymentMethod !== 'qr_self') {
-    const error = new Error('This lead did not use the QR self-payment flow');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (lead.qrPayment?.reviewStatus !== 'pending') {
-    const error = new Error('There is no pending UTR submission to reject for this lead');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  lead.qrPayment.reviewStatus = 'rejected';
-  lead.qrPayment.rejectionReason = reason.trim();
-  lead.qrPayment.reviewedBy = req.user._id;
-  lead.qrPayment.reviewedAt = new Date();
-  lead.leadCallStatus = 'pending_call';
-  lead.status = 'cancelled';
-  await PincodeReservation.findOneAndDelete({
-    pincode: lead.pincode,
-    bookingId: lead._id,
-    status: 'locked',
-  });
-  await lead.save();
-
-  res.status(200).json({ success: true, data: lead });
-});
-
-// PATCH /api/v1/admin/distributor/leads/:id/cancel
-// Releases a pending_manual_payment lead that never converted, freeing the
-// pincode for others. Only valid while still pending — once paid/lock_lost,
-// use other flows (refund process, not cancellation).
-export const cancelManualLead = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  if (!mongoose.isValidObjectId(id)) {
-    const error = new Error('Invalid lead id');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const lead = await DistributorLead.findById(id);
-  if (!lead) {
-    const error = new Error('Lead not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  if (!(lead.status === 'lock_acquired' && lead.paymentMethod === 'manual')) {
-    const error = new Error(`Cannot cancel a lead in its current state`);
-    error.statusCode = 400;
-    throw error;
-  }
-
-  await PincodeReservation.findOneAndDelete({
-    pincode: lead.pincode,
-    bookingId: lead._id,
-    status: 'locked',
-  });
-
-  lead.status = 'cancelled';
-  lead.leadCallStatus = 'not_required';
-  await lead.save();
 
   res.status(200).json({ success: true, data: lead });
 });
@@ -754,25 +468,6 @@ export const updateLeadCallStatus = asyncHandler(async (req, res) => {
   }
 
   res.status(200).json({ success: true, data: lead });
-});
-
-// GET /api/v1/admin/distributor/webhook-logs?bookingId=&page=&limit=
-export const listWebhookLogs = asyncHandler(async (req, res) => {
-  const { bookingId, page = 1, limit = 20 } = req.query;
-  const filter = {};
-  if (bookingId) filter.relatedBookingId = bookingId;
-
-  const skip = (Number(page) - 1) * Number(limit);
-  const [logs, total] = await Promise.all([
-    WebhookLog.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
-    WebhookLog.countDocuments(filter),
-  ]);
-
-  res.status(200).json({
-    success: true,
-    data: logs,
-    pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / Number(limit)) },
-  });
 });
 
 // PATCH /api/v1/admin/distributor/leads/:id/id-created

@@ -6,11 +6,9 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { generateOtp, hashOtp, compareOtp } from '../utils/otp.js';
 import { checkOtpRateLimit, logOtpRequest } from '../utils/otpRateLimiter.js';
 import { sendOtpEmail } from '../services/email.service.js';
-import { acquirePincodeLock, QR_REVIEW_LOCK_DURATION_MS } from '../utils/pincodeLock.js';
-import { markLeadPaid } from '../utils/paymentReconciliation.js';
-import { createRazorpayOrder, verifyPaymentSignature, verifyWebhookSignature } from '../services/razorpay.service.js';
-import { config } from '../config/environment.js';
-import WebhookLog from '../models/WebhookLog.js';
+import { acquirePincodeLock } from '../utils/pincodeLock.js';
+import { sumPayments } from '../utils/distributorPayments.js';
+import { DISTRIBUTOR_PLANS, isValidPlan, gstBreakdown, publicPlans } from '../config/distributorFees.js';
 import { checkEmailValidity } from '../utils/emailVerification.js';
 import { uploadFile } from '../services/s3.service.js';
 
@@ -19,7 +17,68 @@ const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
 const REQUIRED_CONSENTS = ['nonRefundable', 'terms', 'kyc', 'genuineMerchants', 'policyViolation'];
 const MAX_OTP_ATTEMPTS = 5;
 const OTP_VALIDITY_MS = 5 * 60 * 1000;
-const BOOKING_AMOUNT_PAISE = 118000; // ₹1,180, inclusive of GST — never charge extra on top
+const UTR_REGEX = /^[A-Za-z0-9]{6,22}$/;
+
+// Shared by the full-plan UTR submission and the booking plan's final
+// payment — both collect the same KYC details. Returns the cleaned values or
+// throws a 400.
+const validateKyc = ({ panCard, aadhaarAddress, shopName, shopAddress }) => {
+  const kyc = {
+    panCard: (panCard || '').trim().toUpperCase(),
+    aadhaarAddress: (aadhaarAddress || '').trim(),
+    shopName: (shopName || '').trim(),
+    shopAddress: (shopAddress || '').trim(),
+  };
+
+  if (!kyc.panCard || !kyc.aadhaarAddress || !kyc.shopName || !kyc.shopAddress) {
+    const error = new Error('PAN card, Aadhaar address, shop name and shop address are required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!PAN_REGEX.test(kyc.panCard)) {
+    const error = new Error('Please enter a valid PAN card number (e.g. ABCDE1234F)');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return kyc;
+};
+
+const assertAadhaarUploaded = (lead) => {
+  if (!lead.aadhaarFrontUrl || !lead.aadhaarBackUrl) {
+    const error = new Error('Please upload both the front and back images of your Aadhaar card');
+    error.statusCode = 400;
+    throw error;
+  }
+};
+
+const assertValidUtr = (utr) => {
+  const trimmed = (utr || '').trim();
+  if (!UTR_REGEX.test(trimmed)) {
+    const error = new Error('Please enter a valid UTR / transaction reference number');
+    error.statusCode = 400;
+    throw error;
+  }
+  return trimmed;
+};
+
+// App-level UTR uniqueness across every place a UTR can live. payments[].utr
+// can't carry a DB unique index (it's inside an array), so this is a
+// query-then-insert check — the small race window is acceptable since every
+// UTR is staff-reviewed before it moves any status.
+const assertUtrUnused = async (utr) => {
+  const used = await DistributorLead.findOne({
+    $or: [{ 'qrPayment.utr': utr }, { 'payments.utr': utr }, { 'refund.utr': utr }],
+  });
+  if (used) {
+    const error = new Error(
+      'This transaction reference number has already been submitted. If you believe this is a mistake, please contact support.'
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+};
 
 // POST /api/v1/distributor/check-pincode
 // Read-only — no lock is taken here. Two people checking the same pincode
@@ -265,9 +324,7 @@ export const verifyExistingBookingOtp = asyncHandler(async (req, res) => {
   await lead.save();
 
   const totalFee = lead.totalDistributorFee || 0;
-  const amountPaid = lead.payments
-    .filter((p) => p.status === 'success')
-    .reduce((sum, p) => sum + p.amount, 0);
+  const amountPaid = sumPayments(lead);
   const pendingAmount = Math.max(0, totalFee - amountPaid);
 
   res.status(200).json({
@@ -289,8 +346,10 @@ export const verifyExistingBookingOtp = asyncHandler(async (req, res) => {
 });
 
 // POST /api/v1/distributor/existing-booking/upload-aadhaar
-// Uploads a single Aadhaar image (front or back) for the final-payment step
-// and stores its R2 URL directly on the lead. Deliberately separate from
+// Uploads a single Aadhaar image (front or back) and stores its R2 URL
+// directly on the lead. Used by both KYC steps: the booking plan's final
+// payment (lead 'paid') and the full plan before its only payment (lead
+// 'otp_verified'). Deliberately separate from
 // submitFinalUtr so the frontend can upload+preview each side immediately
 // on file selection, rather than holding files in memory until final submit.
 export const uploadAadhaarImage = asyncHandler(async (req, res) => {
@@ -315,8 +374,8 @@ export const uploadAadhaarImage = asyncHandler(async (req, res) => {
   }
 
   const lead = await DistributorLead.findById(bookingId);
-  if (!lead || lead.status !== 'paid') {
-    const error = new Error('This booking is not eligible for final payment');
+  if (!lead || !['paid', 'otp_verified'].includes(lead.status)) {
+    const error = new Error('This booking is not eligible for KYC upload');
     error.statusCode = 400;
     throw error;
   }
@@ -347,7 +406,7 @@ export const uploadAadhaarImage = asyncHandler(async (req, res) => {
 // confirmed rule, only an admin approving this UTR can move status to
 // 'activated'. Submitting here just queues it for review.
 export const submitFinalUtr = asyncHandler(async (req, res) => {
-  const { bookingId, utr, panCard, aadhaarAddress, shopName, shopAddress, referralCode } = req.body;
+  const { bookingId, utr, referralCode } = req.body;
 
   if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
     const error = new Error('Invalid bookingId');
@@ -355,29 +414,8 @@ export const submitFinalUtr = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  const trimmedPanCard = (panCard || '').trim().toUpperCase();
-  const trimmedAadhaarAddress = (aadhaarAddress || '').trim();
-  const trimmedShopName = (shopName || '').trim();
-  const trimmedShopAddress = (shopAddress || '').trim();
-
-  if (!trimmedPanCard || !trimmedAadhaarAddress || !trimmedShopName || !trimmedShopAddress) {
-    const error = new Error('PAN card, Aadhaar address, shop name and shop address are required');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (!PAN_REGEX.test(trimmedPanCard)) {
-    const error = new Error('Please enter a valid PAN card number (e.g. ABCDE1234F)');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const trimmedUtr = (utr || '').trim();
-  if (!UTR_REGEX.test(trimmedUtr)) {
-    const error = new Error('Please enter a valid UTR / transaction reference number');
-    error.statusCode = 400;
-    throw error;
-  }
+  const kyc = validateKyc(req.body);
+  const trimmedUtr = assertValidUtr(utr);
 
   const lead = await DistributorLead.findById(bookingId);
   if (!lead || lead.status !== 'paid') {
@@ -386,54 +424,25 @@ export const submitFinalUtr = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  if (!lead.aadhaarFrontUrl || !lead.aadhaarBackUrl) {
-    const error = new Error('Please upload both the front and back images of your Aadhaar card');
-    error.statusCode = 400;
-    throw error;
-  }
+  assertAadhaarUploaded(lead);
 
-  const totalFee = lead.totalDistributorFee || 0;
-  const amountPaid = lead.payments
-    .filter((p) => p.status === 'success')
-    .reduce((sum, p) => sum + p.amount, 0);
-  const pendingAmount = Math.max(0, totalFee - amountPaid);
-
+  const pendingAmount = Math.max(0, (lead.totalDistributorFee || 0) - sumPayments(lead));
   if (pendingAmount <= 0) {
     const error = new Error('No pending amount remains for this booking');
     error.statusCode = 400;
     throw error;
   }
 
-  // Block resubmission while an earlier final-UTR is still pending review —
-  // same spirit as submitUtr's booking-stage guard.
-  const hasPendingFinalUtr = lead.payments.some(
-    (p) => p.stage === 'final' && p.status === 'pending'
-  );
-  if (hasPendingFinalUtr) {
+  // Block resubmission while an earlier final-UTR is still pending review.
+  if (lead.payments.some((p) => p.stage === 'final' && p.status === 'pending')) {
     const error = new Error('A payment reference is already submitted for this booking and is awaiting review');
     error.statusCode = 400;
     throw error;
   }
 
-  // App-level uniqueness check — payments[].utr can't carry a DB unique
-  // index (it's inside an array), so this is a query-then-insert check.
-  // Small race window is acceptable since this is staff-reviewed, not an
-  // automated activation trigger.
-  const utrAlreadyUsed = await DistributorLead.findOne({
-    $or: [{ 'qrPayment.utr': trimmedUtr }, { 'payments.utr': trimmedUtr }],
-  });
-  if (utrAlreadyUsed) {
-    const error = new Error(
-      'This transaction reference number has already been submitted. If you believe this is a mistake, please contact support.'
-    );
-    error.statusCode = 409;
-    throw error;
-  }
+  await assertUtrUnused(trimmedUtr);
 
-  lead.panCard = trimmedPanCard;
-  lead.aadhaarAddress = trimmedAadhaarAddress;
-  lead.shopName = trimmedShopName;
-  lead.shopAddress = trimmedShopAddress;
+  Object.assign(lead, kyc);
   lead.finalReferralCode = (referralCode || '').trim();
 
   lead.payments.push({
@@ -454,7 +463,7 @@ export const submitFinalUtr = asyncHandler(async (req, res) => {
 
 // POST /api/v1/distributor/send-otp
 // Creates/updates the DistributorLead, sends a fresh OTP. No pincode lock is
-// taken here — that happens later, after OTP verification (Step 4 in the HLD).
+// taken here — that happens at UTR submission (submitUtr).
 export const sendOtp = asyncHandler(async (req, res) => {
   const { name, mobile, email, pincode, asmCode, referralCode, consents } = req.body;
 
@@ -494,39 +503,27 @@ export const sendOtp = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  const normalizedMobile = mobile.trim();
+
   // One distributor = one PIN code, for life. Checked on EITHER email or
-  // mobile matching an existing PAID lead — blocks the obvious workaround of
-  // reusing one identifier with a different other. Deliberately excludes
-  // 'lock_lost' leads: those already paid but didn't end up with a pincode,
-  // and are handled separately via manual outreach (see HLD Section 5) —
-  // this rule shouldn't lock them out while that's still being resolved.
-  const existingPaidLead = await DistributorLead.findOne({
-    status: 'paid',
-    $or: [{ email: normalizedEmail }, { mobile }],
+  // mobile — blocks the obvious workaround of reusing one identifier with a
+  // different other. Covers every state where this identity holds (or is
+  // about to hold) a pincode: under review (lock_acquired), mid-checkout
+  // (order_created), booked (paid) and activated. 'activated' was previously
+  // missing here, which let an activated distributor book a second pincode.
+  // Deliberately excludes refunded/cancelled/failed/expired (no pincode
+  // held) and 'lock_lost' (paid but didn't end up with a pincode — handled
+  // via manual outreach, and shouldn't be locked out while that's resolved).
+  const existingLead = await DistributorLead.findOne({
+    status: { $in: ['lock_acquired', 'order_created', 'paid', 'activated'] },
+    $or: [{ email: normalizedEmail }, { mobile: normalizedMobile }],
   });
 
-  if (existingPaidLead) {
-    const error = new Error(
-      `You have already reserved PIN Code ${existingPaidLead.pincode}. Only one PIN Code reservation is allowed per distributor.`
-    );
-    error.statusCode = 409;
-    throw error;
-  }
-
-  // Block a second concurrent attempt while an earlier one is still in
-  // flight — lock_acquired covers both the QR-review-pending window and
-  // the manual-payment-pending window, since both paths set this status
-  // (see verifyOtp / submitUtr). Without this, the same person could hold
-  // two different pincodes locked at once under the same identity.
-  const existingLockedLead = await DistributorLead.findOne({
-    status: 'lock_acquired',
-    $or: [{ email: normalizedEmail }, { mobile }],
-  });
-
-  if (existingLockedLead) {
-    const error = new Error(
-      `You already have a pending PIN Code reservation (${existingLockedLead.pincode}) awaiting approval. Please wait for it to be processed, or use a different email/mobile.`
-    );
+  if (existingLead) {
+    const message = ['lock_acquired', 'order_created'].includes(existingLead.status)
+      ? `You already have a pending PIN Code reservation (${existingLead.pincode}) awaiting approval. Please wait for it to be processed, or use a different email/mobile.`
+      : `You have already reserved PIN Code ${existingLead.pincode}. Only one PIN Code reservation is allowed per distributor.`;
+    const error = new Error(message);
     error.statusCode = 409;
     throw error;
   }
@@ -540,19 +537,22 @@ export const sendOtp = asyncHandler(async (req, res) => {
 
   // Idempotency: reuse an in-progress lead for the same email+pincode instead
   // of creating a duplicate on every resend or repeated form submit — but
-  // ONLY while it's still pre-verification. A lead that's already otp_verified
-  // or beyond (lock_acquired, order_created, ...) must never be touched here,
-  // or a stray resend could reset its status out from under an active pincode
-  // lock while PincodeReservation still thinks that lead owns it.
+  // ONLY while it hasn't progressed past OTP verification. Anything beyond
+  // (lock_acquired, paid, activated, ...) must never be touched here, or a
+  // stray resend could reset its status out from under an active pincode
+  // lock. Terminal leads (refunded, cancelled, failed, expired, lock_lost)
+  // aren't reused either — a returning user gets a fresh lead, so the old
+  // one's payments[] ledger, qrPayment review state and refund record stay
+  // intact and never leak into the new booking's amounts.
   let lead = await DistributorLead.findOne({
     email: normalizedEmail,
     pincode,
-    status: { $nin: ['paid', 'failed', 'expired', 'lock_lost'] },
+    status: { $in: ['form_submitted', 'otp_sent', 'otp_verified'] },
   });
 
   if (lead) {
     lead.name = name;
-    lead.mobile = mobile;
+    lead.mobile = normalizedMobile;
     lead.asmCode = asmCode || '';
     lead.referralCode = referralCode || '';
     lead.district = master.district;
@@ -567,7 +567,7 @@ export const sendOtp = asyncHandler(async (req, res) => {
   } else {
     lead = await DistributorLead.create({
       name,
-      mobile,
+      mobile: normalizedMobile,
       email: normalizedEmail,
       asmCode: asmCode || '',
       referralCode: referralCode || '',
@@ -618,10 +618,7 @@ export const verifyOtp = asyncHandler(async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'OTP already verified',
-      // Read from the lead itself, not current config — config may have
-      // changed since this lead was originally verified, but the lead's
-      // own stored paymentMethod is what's actually true for it.
-      data: { bookingId: lead._id, manualPayment: lead.paymentMethod === 'manual', paymentMode: lead.paymentMethod },
+      data: { bookingId: lead._id, paymentMode: 'qr_self', plans: publicPlans() },
     });
   }
 
@@ -652,127 +649,35 @@ export const verifyOtp = asyncHandler(async (req, res) => {
   lead.otpVerifiedAt = new Date();
   lead.status = 'otp_verified';
   lead.otpHash = undefined;
-  await lead.save();
-
-  if (config.distributor.qrPaymentMode) {
-    lead.paymentMethod = 'qr_self';
-    const baseAmount = Math.round(BOOKING_AMOUNT_PAISE / 1.18);
-    const gstAmount = BOOKING_AMOUNT_PAISE - baseAmount;
-    lead.gst = { baseAmount, gstAmount, totalAmount: BOOKING_AMOUNT_PAISE };
-  } else if (config.distributor.manualPaymentMode) {
-    lead.paymentMethod = 'manual';
-    lead.leadCallStatus = 'pending_call';
-    const baseAmount = Math.round(BOOKING_AMOUNT_PAISE / 1.18);
-    const gstAmount = BOOKING_AMOUNT_PAISE - baseAmount;
-    lead.gst = { baseAmount, gstAmount, totalAmount: BOOKING_AMOUNT_PAISE };
-  }
-
+  lead.paymentMethod = 'qr_self';
   await lead.save();
 
   res.status(200).json({
     success: true,
     message: 'OTP verified successfully',
-    // manualPayment is kept for backward compatibility with the current
-    // frontend; paymentMode is the new, more explicit field going forward.
-    data: {
-      bookingId: lead._id,
-      manualPayment: lead.paymentMethod === 'manual',
-      paymentMode: lead.paymentMethod,
-    },
+    // paymentMode is always 'qr_self' now (Razorpay and manual mode are
+    // retired) — kept in the response so the checkout's branch still works.
+    // plans carries the live amounts so the frontend never hardcodes them.
+    data: { bookingId: lead._id, paymentMode: 'qr_self', plans: publicPlans() },
   });
 });
-
-// POST /api/v1/distributor/create-order
-// HLD Steps 4+5 combined: acquire the pincode lock (the race-condition-proof
-// step), then create the Razorpay order. Requires OTP already verified.
-export const createOrder = asyncHandler(async (req, res) => {
-  const { bookingId } = req.body;
-
-  if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
-    const error = new Error('Invalid bookingId');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const lead = await DistributorLead.findById(bookingId);
-  if (!lead) {
-    const error = new Error('Booking not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  if (!lead.otpVerified) {
-    const error = new Error('Please verify your OTP before proceeding');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (lead.status === 'paid') {
-    const error = new Error('This booking has already been paid for');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  // Idempotent — verifyOtp already acquired this lead's lock; this just
-  // refreshes the TTL so Razorpay checkout gets a fresh 15-minute window.
-  await acquirePincodeLock({ pincode: lead.pincode, bookingId: lead._id });
-
-  lead.status = 'lock_acquired';
-  await lead.save();
-
-  const baseAmount = Math.round(BOOKING_AMOUNT_PAISE / 1.18);
-  const gstAmount = BOOKING_AMOUNT_PAISE - baseAmount;
-
-  let order;
-  try {
-    order = await createRazorpayOrder({
-      amount: BOOKING_AMOUNT_PAISE,
-      currency: 'INR',
-      receipt: lead._id.toString(),
-      notes: { bookingId: lead._id.toString(), pincode: lead.pincode },
-    });
-  } catch (err) {
-    const error = new Error('Failed to create payment order. Please try again.');
-    error.statusCode = 502;
-    error.details = err.message;
-    throw error;
-  }
-
-  lead.razorpay = {
-    orderId: order.id,
-    amount: BOOKING_AMOUNT_PAISE,
-    currency: 'INR',
-    receipt: lead._id.toString(),
-  };
-  lead.gst = { baseAmount, gstAmount, totalAmount: BOOKING_AMOUNT_PAISE };
-  lead.status = 'order_created';
-  await lead.save();
-
-  res.status(200).json({
-    success: true,
-    data: {
-      manualPayment: false,
-      orderId: order.id,
-      amount: BOOKING_AMOUNT_PAISE,
-      currency: 'INR',
-      keyId: config.razorpay.keyId,
-      bookingId: lead._id,
-      gst: { baseAmount, gstAmount, totalAmount: BOOKING_AMOUNT_PAISE },
-    },
-  });
-});
-
-
-const UTR_REGEX = /^[A-Za-z0-9]{6,22}$/;
 
 // POST /api/v1/distributor/submit-utr
-// Self-serve QR flow: customer scans the static QR, pays externally, then
-// submits the UTR their UPI app showed them. This does NOT mark the lead
-// paid — it only queues it for admin review (see distributorAdmin.controller.js
-// approveUtr/rejectUtr). The pincode lock is extended to a 48-hour window
-// here, since admin review isn't instant like Razorpay's callback.
+// The customer picks a plan, pays the plan's first amount by scanning the
+// static QR, then submits the UTR their UPI app showed them. This does NOT
+// mark anything paid — it records a pending payments[] entry for admin
+// review (approve/reject in distributorAdmin.controller.js).
+//
+// plan 'booking' (default): ₹1,180 now, ₹5,900 later → 'paid' on approval.
+// plan 'full': ₹6,490 once, KYC + Aadhaar images required here first →
+//   'activated' on approval.
+//
+// The pincode lock is taken here with NO expiry — only an admin decision
+// (approve, reject, refund) ends it. The customer has already paid by this
+// point, so if the pincode was taken in the meantime the UTR is still
+// recorded (status 'lock_lost', call queue) for an agent to refund.
 export const submitUtr = asyncHandler(async (req, res) => {
-  const { bookingId, utr } = req.body;
+  const { bookingId, utr, plan = 'booking', referralCode } = req.body;
 
   if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
     const error = new Error('Invalid bookingId');
@@ -780,12 +685,13 @@ export const submitUtr = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  const trimmedUtr = (utr || '').trim();
-  if (!UTR_REGEX.test(trimmedUtr)) {
-    const error = new Error('Please enter a valid UTR / transaction reference number');
+  if (!isValidPlan(plan)) {
+    const error = new Error('Please choose a valid payment plan');
     error.statusCode = 400;
     throw error;
   }
+
+  const trimmedUtr = assertValidUtr(utr);
 
   const lead = await DistributorLead.findById(bookingId);
   if (!lead) {
@@ -794,78 +700,52 @@ export const submitUtr = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  if (lead.paymentMethod !== 'qr_self') {
-    const error = new Error('This booking is not set up for QR payment submission');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (lead.status === 'paid') {
-    const error = new Error('This booking has already been paid for');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (lead.status !== 'otp_verified') {
+  if (lead.status !== 'otp_verified' || !lead.otpVerified) {
     const error = new Error('This booking is not in a state that accepts a UTR submission');
     error.statusCode = 400;
     throw error;
   }
 
-  // Allow resubmission after a rejection, but not while one is already
-  // pending or has been approved (approval should only ever happen once,
-  // via the admin endpoint, which moves status to 'paid' anyway).
-  if (lead.qrPayment?.reviewStatus === 'pending') {
-    const error = new Error('A UTR is already submitted for this booking and is awaiting review');
-    error.statusCode = 400;
-    throw error;
-  }
-  if (lead.qrPayment?.reviewStatus === 'approved') {
-    const error = new Error('This booking has already been approved');
-    error.statusCode = 400;
-    throw error;
+  if (plan === 'full') {
+    Object.assign(lead, validateKyc(req.body));
+    lead.finalReferralCode = (referralCode || '').trim();
+    assertAadhaarUploaded(lead);
   }
 
-  // Refresh the lock to the longer review window before anything else, so
-  // a slow admin queue doesn't risk losing the pincode mid-submission.
+  await assertUtrUnused(trimmedUtr);
+
+  const { total, firstStage, firstAmount } = DISTRIBUTOR_PLANS[plan];
+  lead.plan = plan;
+  lead.paymentMethod = 'qr_self';
+  lead.totalDistributorFee = total;
+  lead.gst = gstBreakdown(firstAmount);
+  lead.payments.push({
+    stage: firstStage,
+    method: 'qr_self',
+    amount: firstAmount,
+    status: 'pending',
+    utr: trimmedUtr,
+  });
+
   try {
-    await acquirePincodeLock({
-      pincode: lead.pincode,
-      bookingId: lead._id,
-      durationMs: null,
-    });
+    await acquirePincodeLock({ pincode: lead.pincode, bookingId: lead._id, durationMs: null });
   } catch (err) {
-    // Extremely unlikely at this stage (lead already owns the lock from
-    // verifyOtp), but if the lock was somehow lost in the meantime, surface
-    // that clearly rather than letting the UTR get submitted against a
-    // pincode this lead no longer holds.
-    const error = new Error('Your pincode reservation could not be extended. Please contact support.');
+    if (err.statusCode !== 409) throw err;
+
+    lead.status = 'lock_lost';
+    lead.lostReason = 'PIN Code was taken by another applicant before this UTR was submitted';
+    lead.leadCallStatus = 'pending_call';
+    await lead.save();
+
+    const error = new Error(
+      'Sorry, this PIN Code was just reserved by someone else. We have recorded your payment reference and our team will contact you about a refund.'
+    );
     error.statusCode = 409;
     throw error;
   }
 
   lead.status = 'lock_acquired';
-
-  lead.qrPayment = {
-    utr: trimmedUtr,
-    submittedAt: new Date(),
-    reviewStatus: 'pending',
-  };
-
-  try {
-    await lead.save();
-  } catch (err) {
-    // Sparse unique index on qrPayment.utr — this is MongoDB's duplicate
-    // key error, meaning someone already submitted this exact UTR before.
-    if (err.code === 11000) {
-      const error = new Error(
-        'This transaction reference number has already been submitted. If you believe this is a mistake, please contact support.'
-      );
-      error.statusCode = 409;
-      throw error;
-    }
-    throw err;
-  }
+  await lead.save();
 
   // TODO: notify the admin team that a new UTR is pending review — needs
   // email.service.js to wire up correctly, not adding a guessed call here.
@@ -873,149 +753,6 @@ export const submitUtr = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Your payment reference has been submitted and is pending verification.',
-    data: { bookingId: lead._id, status: 'pending_review' },
+    data: { bookingId: lead._id, plan, status: 'pending_review' },
   });
-});
-
-// POST /api/v1/distributor/verify-payment
-// HLD Step 7a — client-side checkout callback. Optimistic, UX-only. NOT the
-// source of truth (see razorpayWebhook below) — just lets the frontend show
-// a success page immediately without waiting on the webhook round-trip.
-export const verifyPayment = asyncHandler(async (req, res) => {
-  const { bookingId, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
-
-  if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
-    const error = new Error('Invalid bookingId');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-    const error = new Error('Missing payment verification fields');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const isValid = verifyPaymentSignature({
-    orderId: razorpay_order_id,
-    paymentId: razorpay_payment_id,
-    signature: razorpay_signature,
-  });
-
-  if (!isValid) {
-    const error = new Error('Payment signature verification failed');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const { lockLost } = await markLeadPaid({
-    bookingId,
-    orderId: razorpay_order_id,
-    paymentId: razorpay_payment_id,
-    signature: razorpay_signature,
-  });
-
-  res.status(200).json({
-    success: true,
-    message: lockLost
-      ? 'Payment received, but there was an issue with your pincode reservation. Our team will contact you shortly.'
-      : 'Payment verified successfully',
-    data: { bookingId, lockLost },
-  });
-});
-
-// POST /api/v1/distributor/webhook/razorpay
-// HLD Step 7b — the ACTUAL source of truth. Fires independently of what the
-// browser does, so this is what catches the case where the user closes the
-// tab right after paying and before the client-side redirect fires.
-// Requires req.rawBody (raw Buffer, captured before JSON parsing) — see
-// app.js instructions for the express.json({ verify }) change needed.
-export const razorpayWebhook = asyncHandler(async (req, res) => {
-  const signature = req.headers['x-razorpay-signature'];
-
-  if (!signature || !req.rawBody) {
-    await WebhookLog.create({
-      signatureValid: false,
-      processingStatus: 'invalid_signature',
-      processingNote: 'Missing signature header or raw body',
-    });
-    return res.status(400).json({ success: false, message: 'Missing signature or raw body' });
-  }
-
-  const isValid = verifyWebhookSignature(req.rawBody, signature);
-
-  if (!isValid) {
-    await WebhookLog.create({
-      signatureValid: false,
-      processingStatus: 'invalid_signature',
-      payload: req.body,
-      processingNote: 'Signature verification failed',
-    });
-    return res.status(400).json({ success: false, message: 'Invalid webhook signature' });
-  }
-
-  const event = req.body;
-  const eventType = event.event;
-  let relatedBookingId = null;
-  let processingStatus = 'ignored';
-  let processingNote = `Unhandled event type: ${eventType}`;
-
-  if (eventType === 'payment.captured') {
-    const payment = event.payload?.payment?.entity;
-    const bookingId = payment?.notes?.bookingId;
-
-    if (!bookingId || !mongoose.isValidObjectId(bookingId)) {
-      processingStatus = 'error';
-      processingNote = `payment.captured missing/invalid bookingId in notes (payment: ${payment?.id})`;
-      console.error('❌', processingNote);
-    } else {
-      relatedBookingId = bookingId;
-      try {
-        const { lockLost } = await markLeadPaid({
-          bookingId,
-          orderId: payment.order_id,
-          paymentId: payment.id,
-        });
-        processingStatus = 'processed';
-        processingNote = lockLost
-          ? 'Marked paid, but lock_lost (pincode was re-sold before webhook arrived)'
-          : 'Marked paid successfully';
-        if (lockLost) {
-          console.warn(`⚠️  Booking ${bookingId} paid but lock_lost — flagged for manual outreach/refund.`);
-        }
-      } catch (err) {
-        processingStatus = 'error';
-        processingNote = `markLeadPaid threw: ${err.message}`;
-        console.error('❌', processingNote);
-      }
-    }
-  } else if (eventType === 'payment.failed') {
-    const payment = event.payload?.payment?.entity;
-    const bookingId = payment?.notes?.bookingId;
-
-    if (bookingId && mongoose.isValidObjectId(bookingId)) {
-      relatedBookingId = bookingId;
-      await DistributorLead.findOneAndUpdate(
-        { _id: bookingId, status: { $ne: 'paid' } },
-        { $set: { status: 'failed', leadCallStatus: 'pending_call' } }
-      );
-      processingStatus = 'processed';
-      processingNote = 'Marked failed';
-    } else {
-      processingStatus = 'ignored';
-      processingNote = 'payment.failed with no bookingId in notes';
-    }
-  }
-
-  await WebhookLog.create({
-    eventType,
-    razorpayEventId: event.id,
-    signatureValid: true,
-    payload: event,
-    relatedBookingId,
-    processingStatus,
-    processingNote,
-  });
-
-  res.status(200).json({ success: true });
 });

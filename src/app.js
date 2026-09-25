@@ -21,10 +21,7 @@ app.use(cors({
   credentials: true,
 }));
 app.use(morgan('dev'));
-app.use(express.json({
-  limit: '10mb',
-  verify: (req, res, buf) => { req.rawBody = buf; },
-}));
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get('/api/v1/health', (req, res) => {

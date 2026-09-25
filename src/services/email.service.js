@@ -90,7 +90,7 @@ export const sendPaymentConfirmationEmail = async ({ to, name, pincode, district
                     <td style="padding: 6px 0; font-size: 14px; color: #111827; font-weight: 600; text-align: right;">₹${(amount / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                   </tr>
                   <tr>
-                    <td style="padding: 6px 0; font-size: 13px; color: #6b7280;">Payment ID</td>
+                    <td style="padding: 6px 0; font-size: 13px; color: #6b7280;">UTR / Reference</td>
                     <td style="padding: 6px 0; font-size: 13px; color: #111827; font-weight: 500; text-align: right; font-family: monospace;">${paymentId}</td>
                   </tr>
                 </table>
@@ -147,7 +147,7 @@ export const sendDistributorActivationEmail = async ({ to, name, pincode, distri
               </div>
 
               <p style="font-size: 15px; line-height: 1.6; color: #4b5563; margin: 0 0 24px;">
-                Your final payment has been verified and your PIN Code <strong style="color: #111827;">${pincode}</strong> (${district}, ${state}) is now <strong style="color: #059669;">fully activated</strong>. You can now start onboarding merchants in your territory as a Cashlo Distributor.
+                Your payment has been verified and your PIN Code <strong style="color: #111827;">${pincode}</strong> (${district}, ${state}) is now <strong style="color: #059669;">fully activated</strong>. You can now start onboarding merchants in your territory as a Cashlo Distributor.
               </p>
 
               <!-- Details card -->
